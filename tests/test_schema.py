@@ -33,6 +33,11 @@ class SchemaRecorder:
         table = self.metadata.tables[table_name]
         sa.Index(name, *(table.c[c] for c in columns), **kwargs)
 
+    def drop_index(self, name, table_name, **kwargs):
+        table = self.metadata.tables[table_name]
+        index = next(index for index in table.indexes if index.name == name)
+        table.indexes.remove(index)
+
 
 def ddl(metadata):
     dialect = postgresql.dialect()
@@ -82,6 +87,10 @@ class SchemaTests(unittest.TestCase):
                          {'viewer_id', 'shown_user_id', 'event_id'})
         self.assertEqual(set(Base.metadata.tables['event_reactions'].primary_key.columns.keys()),
                          {'user_id', 'event_id'})
+
+    def test_event_can_have_multiple_primary_tags(self):
+        indexes = Base.metadata.tables['event_tags'].indexes
+        self.assertNotIn('uq_event_tags_primary', {index.name for index in indexes})
 
     def test_async_safe_relationships(self):
         configure_mappers()

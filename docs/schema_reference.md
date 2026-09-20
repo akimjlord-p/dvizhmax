@@ -287,7 +287,6 @@ Primary key: `event_id, tag_id`.
 - FK `event_id` -> `events.id`
 - FK `tag_id, kind` -> `tags.id, tags.kind`
 - `CREATE INDEX ix_event_tags_tag_id ON event_tags (tag_id)`
-- `CREATE UNIQUE INDEX uq_event_tags_primary ON event_tags (event_id) WHERE kind = 'primary'`
 
 ## companion_interests
 

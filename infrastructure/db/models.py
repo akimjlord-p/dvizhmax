@@ -137,7 +137,6 @@ class EventTag(Base):
     __tablename__ = "event_tags"
     __table_args__ = (
         ForeignKeyConstraint(["tag_id", "kind"], ["tags.id", "tags.kind"]),
-        Index("uq_event_tags_primary", "event_id", unique=True, postgresql_where=text("kind = 'primary'")),
         Index("ix_event_tags_tag_id", "tag_id"),
     )
 
