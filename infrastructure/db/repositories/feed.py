@@ -1,0 +1,412 @@
+"""Queries and state changes for the event recommendation feed."""
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Iterable
+from uuid import UUID
+
+from sqlalchemy import and_, exists, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Place, Tag
+from ..social_models import EventPlan, EventReaction, User, UserTagWeight
+from .onboarding import OnboardingError
+
+
+LIKE_WEIGHT_DELTA = Decimal("0.1")
+WANT_TO_GO_WEIGHT_DELTA = Decimal("0.5")
+SECONDARY_TAG_MULTIPLIER = Decimal("0.4")
+
+
+@dataclass(frozen=True, slots=True)
+class EventCard:
+    id: UUID
+    title: str
+    description: str | None
+    city_timezone: str
+    place_name: str | None
+    place_address: str | None
+    price_text: str | None
+    is_free: bool | None
+    data_status: str
+    source_url: str
+    starts_at: datetime | None
+    image_url: str | None
+    primary_codes: frozenset[str]
+    tag_codes: frozenset[str]
+    tag_kinds: tuple[tuple[str, str], ...]
+    score: Decimal = Decimal("0")
+    plan_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WantToGoResult:
+    plan_id: UUID
+    was_created: bool
+
+
+class FeedRepository:
+    """Produces unseen cards and records the preference signals they create."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def next_card(self, user_id: UUID) -> EventCard | None:
+        cards, weights, reaction_count, history = await self._candidate_cards(user_id)
+        ranked = rank_cards(
+            cards,
+            weights=weights,
+            reaction_count=reaction_count,
+            prior_primary_tags=history,
+        )
+        return ranked[0] if ranked else None
+
+    async def liked_cards(self, user_id: UUID) -> list[EventCard]:
+        user = await self._require_user(user_id)
+        event_ids = list(
+            (
+                await self.session.scalars(
+            select(EventReaction.event_id)
+            .where(
+                EventReaction.user_id == user.id,
+                EventReaction.reaction == "like",
+                ~exists(
+                    select(EventPlan.id).where(
+                        EventPlan.user_id == user.id,
+                        EventPlan.event_id == EventReaction.event_id,
+                    )
+                ),
+            )
+            .order_by(EventReaction.updated_at.desc())
+                )
+            ).all()
+        )
+        if not event_ids:
+            return []
+        cards, weights, _, _ = await self._candidate_cards(
+            user_id,
+            event_ids=event_ids,
+            include_reacted=True,
+        )
+        cards_by_id = {card.id: card for card in cards}
+        return [
+            replace(cards_by_id[event_id], score=score_card(cards_by_id[event_id], weights))
+            for event_id in event_ids
+            if event_id in cards_by_id
+        ]
+
+    async def liked_card(self, user_id: UUID, event_id: UUID) -> EventCard | None:
+        return next(
+            (card for card in await self.liked_cards(user_id) if card.id == event_id),
+            None,
+        )
+
+    async def planned_cards(self, user_id: UUID) -> list[EventCard]:
+        user = await self._require_user(user_id)
+        plans = list(
+            (
+                await self.session.scalars(
+                    select(EventPlan)
+                    .where(EventPlan.user_id == user.id, EventPlan.status == "planned")
+                    .order_by(EventPlan.created_at.desc())
+                )
+            ).all()
+        )
+        if not plans:
+            return []
+        cards, weights, _, _ = await self._candidate_cards(
+            user_id,
+            event_ids=(plan.event_id for plan in plans),
+            include_reacted=True,
+            feed_only=False,
+        )
+        cards_by_id = {card.id: card for card in cards}
+        return [
+            replace(
+                cards_by_id[plan.event_id],
+                score=score_card(cards_by_id[plan.event_id], weights),
+                plan_id=plan.id,
+            )
+            for plan in plans
+            if plan.event_id in cards_by_id
+        ]
+
+    async def record_reaction(self, user_id: UUID, event_id: UUID, reaction: str) -> None:
+        if reaction not in {"like", "skip"}:
+            raise OnboardingError("Unsupported event reaction")
+        user = await self._require_user(user_id)
+        event = await self.session.get(Event, event_id)
+        if event is None or event.city_id != user.city_id:
+            raise OnboardingError("This event is unavailable")
+        existing = await self.session.get(EventReaction, (user.id, event_id))
+        if existing is not None:
+            raise OnboardingError("This event has already been evaluated")
+        self.session.add(EventReaction(user_id=user.id, event_id=event_id, reaction=reaction))
+        if reaction == "like":
+            await self._change_event_tag_weights(user.id, event_id, LIKE_WEIGHT_DELTA)
+
+    async def want_to_go(self, user_id: UUID, event_id: UUID) -> WantToGoResult:
+        """Create a plan and record implicit positive intent when needed."""
+        user = await self._require_user(user_id)
+        event = await self.session.get(Event, event_id)
+        if event is None or event.city_id != user.city_id:
+            raise OnboardingError("This event is unavailable")
+        reaction = await self.session.get(EventReaction, (user.id, event_id))
+        if reaction is None:
+            self.session.add(EventReaction(user_id=user.id, event_id=event_id, reaction="like"))
+        elif reaction.reaction != "like":
+            raise OnboardingError("This event is unavailable for plans")
+        existing = await self.session.scalar(
+            select(EventPlan).where(EventPlan.user_id == user.id, EventPlan.event_id == event_id)
+        )
+        if existing is not None:
+            return WantToGoResult(plan_id=existing.id, was_created=False)
+        plan = EventPlan(user_id=user.id, event_id=event_id)
+        self.session.add(plan)
+        await self._change_event_tag_weights(user.id, event_id, WANT_TO_GO_WEIGHT_DELTA)
+        await self.session.flush()
+        return WantToGoResult(plan_id=plan.id, was_created=True)
+
+    async def set_company_search(self, user_id: UUID, plan_id: UUID, *, looking: bool) -> None:
+        user = await self._require_user(user_id)
+        if looking and user.profile_status != "active":
+            raise OnboardingError("Complete your profile before searching for company")
+        plan = await self.session.get(EventPlan, plan_id)
+        if plan is None or plan.user_id != user_id or plan.status != "planned":
+            raise OnboardingError("Plan is unavailable")
+        plan.company_status = "looking" if looking else "not_looking"
+
+    async def _candidate_cards(
+        self,
+        user_id: UUID,
+        *,
+        event_ids: Iterable[UUID] | None = None,
+        include_reacted: bool = False,
+        feed_only: bool = True,
+    ) -> tuple[list[EventCard], dict[str, Decimal], int, list[frozenset[str]]]:
+        user = await self._require_user(user_id)
+        conditions = [Event.city_id == user.city_id]
+        if feed_only:
+            conditions.extend(
+                [
+                    Event.data_status.in_(("current", "uncertain")),
+                    Event.tagging_status == "done",
+                ]
+            )
+        if event_ids is not None:
+            conditions.append(Event.id.in_(tuple(event_ids)))
+        if not include_reacted:
+            conditions.append(
+                ~exists(
+                    select(EventReaction.user_id).where(
+                        EventReaction.user_id == user.id,
+                        EventReaction.event_id == Event.id,
+                    )
+                )
+            )
+        rows = (
+            await self.session.execute(
+                select(Event, Place, EventSource, City)
+                .outerjoin(Place, Place.id == Event.place_id)
+                .join(EventSource, and_(EventSource.event_id == Event.id, EventSource.is_primary.is_(True)))
+                .join(City, City.id == Event.city_id)
+                .where(*conditions)
+            )
+        ).all()
+        if not rows:
+            return [], {}, 0, []
+
+        events = {event.id: (event, place, source, city) for event, place, source, city in rows}
+        event_ids_tuple = tuple(events)
+        tags_by_event = await self._tags_by_event(event_ids_tuple)
+        images = await self._images_by_event(event_ids_tuple)
+        schedules = await self._schedules_by_event(event_ids_tuple)
+        weights = await self._weights(user.id)
+        now = datetime.now(timezone.utc)
+        cards: list[EventCard] = []
+        for event_id, (event, place, source, city) in events.items():
+            event_schedules = schedules.get(event_id, [])
+            if event_schedules and not has_upcoming_schedule(event_schedules, now):
+                continue
+            starts_at = upcoming_schedule(event_schedules, now)
+            tagged = tags_by_event.get(event_id, [])
+            primary = frozenset(code for code, kind in tagged if kind == "primary")
+            if not primary:
+                continue
+            cards.append(
+                EventCard(
+                    id=event.id,
+                    title=event.title,
+                    description=event.description,
+                    city_timezone=city.timezone,
+                    place_name=place.name if place else None,
+                    place_address=place.address if place else None,
+                    price_text=event.price_text,
+                    is_free=event.is_free,
+                    data_status=event.data_status,
+                    source_url=source.source_url,
+                    starts_at=starts_at,
+                    image_url=images.get(event_id),
+                    primary_codes=primary,
+                    tag_codes=frozenset(code for code, _ in tagged),
+                    tag_kinds=tuple(tagged),
+                )
+            )
+        cards = [replace(card, score=score_card(card, weights)) for card in cards]
+        reaction_count = await self.session.scalar(
+            select(func.count()).select_from(EventReaction).where(EventReaction.user_id == user.id)
+        )
+        history = await self._recent_primary_tags(user.id)
+        return cards, weights, int(reaction_count or 0), history
+
+    async def _tags_by_event(self, event_ids: tuple[UUID, ...]) -> dict[UUID, list[tuple[str, str]]]:
+        rows = (
+            await self.session.execute(
+                select(EventTag.event_id, Tag.code, EventTag.kind)
+                .join(Tag, Tag.id == EventTag.tag_id)
+                .where(EventTag.event_id.in_(event_ids))
+            )
+        ).all()
+        result: dict[UUID, list[tuple[str, str]]] = {}
+        for event_id, code, kind in rows:
+            result.setdefault(event_id, []).append((code, kind))
+        return result
+
+    async def _images_by_event(self, event_ids: tuple[UUID, ...]) -> dict[UUID, str]:
+        rows = (
+            await self.session.execute(
+                select(EventSource.event_id, EventImage.url)
+                .join(EventImage, EventImage.event_source_id == EventSource.id)
+                .where(EventSource.event_id.in_(event_ids))
+                .order_by(EventSource.event_id, EventImage.position)
+            )
+        ).all()
+        result: dict[UUID, str] = {}
+        for event_id, url in rows:
+            result.setdefault(event_id, url)
+        return result
+
+    async def _schedules_by_event(self, event_ids: tuple[UUID, ...]) -> dict[UUID, list[EventSchedule]]:
+        rows = (
+            await self.session.execute(
+                select(EventSource.event_id, EventSchedule)
+                .join(EventSchedule, EventSchedule.event_source_id == EventSource.id)
+                .where(EventSource.event_id.in_(event_ids))
+            )
+        ).all()
+        result: dict[UUID, list[EventSchedule]] = {}
+        for event_id, schedule in rows:
+            result.setdefault(event_id, []).append(schedule)
+        return result
+
+    async def _weights(self, user_id: UUID) -> dict[str, Decimal]:
+        rows = (
+            await self.session.execute(
+                select(Tag.code, UserTagWeight.initial_weight, UserTagWeight.reaction_weight)
+                .join(Tag, Tag.id == UserTagWeight.tag_id)
+                .where(UserTagWeight.user_id == user_id)
+            )
+        ).all()
+        return {code: Decimal(initial) + Decimal(reaction) for code, initial, reaction in rows}
+
+    async def _recent_primary_tags(self, user_id: UUID) -> list[frozenset[str]]:
+        event_ids = list(
+            (
+                await self.session.scalars(
+                    select(EventReaction.event_id)
+                    .where(EventReaction.user_id == user_id)
+                    .order_by(EventReaction.updated_at.desc())
+                    .limit(2)
+                )
+            ).all()
+        )
+        if not event_ids:
+            return []
+        tagged = await self._tags_by_event(tuple(event_ids))
+        return [
+            frozenset(code for code, kind in tagged.get(event_id, []) if kind == "primary")
+            for event_id in reversed(event_ids)
+        ]
+
+    async def _change_event_tag_weights(self, user_id: UUID, event_id: UUID, delta: Decimal) -> None:
+        tag_ids = list(
+            (
+                await self.session.scalars(select(EventTag.tag_id).where(EventTag.event_id == event_id))
+            ).all()
+        )
+        for tag_id in tag_ids:
+            weight = await self.session.get(UserTagWeight, (user_id, tag_id))
+            if weight is None:
+                self.session.add(
+                    UserTagWeight(
+                        user_id=user_id,
+                        tag_id=tag_id,
+                        initial_weight=Decimal("0"),
+                        reaction_weight=delta,
+                    )
+                )
+            else:
+                weight.reaction_weight += delta
+
+    async def _require_user(self, user_id: UUID) -> User:
+        user = await self.session.get(User, user_id)
+        if user is None:
+            raise OnboardingError("User not found")
+        return user
+
+
+def upcoming_schedule(schedules: list[EventSchedule], now: datetime) -> datetime | None:
+    valid = [
+        schedule
+        for schedule in schedules
+        if schedule.ends_at is None or schedule.ends_at >= now
+    ]
+    starts = [schedule.starts_at for schedule in valid if schedule.starts_at is not None]
+    if starts:
+        return min(starts)
+    return None
+
+
+def has_upcoming_schedule(schedules: list[EventSchedule], now: datetime) -> bool:
+    return any(schedule.ends_at is None or schedule.ends_at >= now for schedule in schedules)
+
+
+def score_card(card: EventCard, weights: dict[str, Decimal]) -> Decimal:
+    return sum(
+        (
+            weights.get(code, Decimal("0"))
+            * (Decimal("1") if kind == "primary" else SECONDARY_TAG_MULTIPLIER)
+            for code, kind in card.tag_kinds
+        ),
+        start=Decimal("0"),
+    )
+
+
+def rank_cards(
+    cards: list[EventCard],
+    *,
+    weights: dict[str, Decimal],
+    reaction_count: int,
+    prior_primary_tags: list[frozenset[str]],
+    rng: random.Random | None = None,
+) -> list[EventCard]:
+    """Diversify a ranked list and make every fourth card exploratory."""
+    pool = sorted(cards, key=lambda card: (-card.score, str(card.id)))
+    history = list(prior_primary_tags[-2:])
+    result: list[EventCard] = []
+    generator = rng or random.Random()
+    while pool:
+        allowed = [
+            card for card in pool
+            if len(history) < 2 or not (card.primary_codes & history[-1] & history[-2])
+        ]
+        candidates = allowed or pool
+        position = reaction_count + len(result) + 1
+        selected = generator.choice(candidates) if position % 4 == 0 else candidates[0]
+        pool.remove(selected)
+        result.append(selected)
+        history.append(selected.primary_codes)
+    return result

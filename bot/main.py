@@ -1,4 +1,4 @@
-"""Webhook process for the Р”РІРёР¶РњРђРљРЎ MAX bot."""
+"""Webhook process for the ДвижМАКС MAX bot."""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.enums import UpdateType
 
+from bot.feed import register_feed_handlers
 from bot.onboarding import register_onboarding_handlers
 from infrastructure.db.session import create_async_database_engine, create_session_factory
 
@@ -35,6 +36,7 @@ async def main() -> None:
     engine = create_async_database_engine()
     session_factory = create_session_factory(engine)
     register_onboarding_handlers(dispatcher, session_factory)
+    register_feed_handlers(dispatcher, session_factory)
     try:
         try:
             await _register_webhook(bot)
