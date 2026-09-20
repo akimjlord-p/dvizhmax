@@ -26,7 +26,7 @@ class User(UUIDPrimaryKey, Timestamps, Base):
         CheckConstraint(
             "profile_status != 'active' OR (name IS NOT NULL AND length(trim(name)) > 0 "
             "AND gender IS NOT NULL AND length(trim(gender)) > 0 AND age IS NOT NULL "
-            "AND city_id IS NOT NULL AND (photo_url IS NOT NULL OR photo_attachment IS NOT NULL))",
+            "AND city_id IS NOT NULL)",
             name="active_profile_complete",
         ),
     )

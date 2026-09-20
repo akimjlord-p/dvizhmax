@@ -38,6 +38,15 @@ class SchemaRecorder:
         index = next(index for index in table.indexes if index.name == name)
         table.indexes.remove(index)
 
+    def drop_constraint(self, name, table_name, **kwargs):
+        table = self.metadata.tables[table_name]
+        constraint = next(constraint for constraint in table.constraints if constraint.name == name)
+        table.constraints.remove(constraint)
+
+    def create_check_constraint(self, name, table_name, condition, **kwargs):
+        table = self.metadata.tables[table_name]
+        table.append_constraint(sa.CheckConstraint(condition, name=name))
+
 
 def ddl(metadata):
     dialect = postgresql.dialect()
