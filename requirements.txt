@@ -2,3 +2,5 @@ SQLAlchemy>=2.0,<2.1
 alembic>=1.13,<2
 psycopg[binary]>=3.2,<4
 httpx>=0.28,<0.29
+python-dotenv>=1.0,<2
+yandex-ai-studio-sdk>=0.19,<1

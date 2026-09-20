@@ -45,6 +45,27 @@ async with KudaGoClient() as client:
 Репозитории впоследствии можно добавить в `infrastructure/db/repositories/`.
 Модели описывают хранение, репозитории выполняют запросы, сервисы управляют импортом.
 
+## ИИ-разметка событий
+
+`integrations/yandex_tagger.py` использует официальный Yandex AI Studio SDK и
+YandexGPT Lite 5 для разметки новых карточек. Модель получает название,
+описание и исходные категории KudaGo и возвращает JSON с кодами из
+фиксированного словаря. Ответ проверяется до передачи в будущий repository:
+неизвестные коды и неправильный формат отбрасываются ошибкой.
+
+Для запуска укажите в `.env` `YANDEX_API_KEY` и `YANDEX_FOLDER_ID`. Вместо
+идентификатора каталога можно задать полный `YANDEX_MODEL_URI`.
+
+```python
+from integrations import KudaGoClient, YandexTagger, normalize_event
+
+async with KudaGoClient() as kudago, YandexTagger() as tagger:
+    async for payload in kudago.iter_events(location="msk"):
+        draft = normalize_event(payload, city_id=city_id)
+        tags = await tagger.tag_event(draft)
+        await repository.upsert_event(draft, tags=tags)
+```
+
 ## Подготовка и миграции (PowerShell)
 
 ```powershell

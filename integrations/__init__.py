@@ -10,6 +10,16 @@ from .kudago import (
     ScheduleDraft,
     normalize_event,
 )
+from .yandex_tagger import (
+    PRIMARY_TAGS,
+    SECONDARY_TAGS,
+    TaggingResult,
+    TaggingUsage,
+    YandexTagger,
+    YandexTaggerConfigError,
+    YandexTaggerError,
+    YandexTaggerSettings,
+)
 
 __all__ = [
     "EventDraft",
@@ -20,4 +30,12 @@ __all__ = [
     "PlaceDraft",
     "ScheduleDraft",
     "normalize_event",
+    "PRIMARY_TAGS",
+    "SECONDARY_TAGS",
+    "TaggingResult",
+    "TaggingUsage",
+    "YandexTagger",
+    "YandexTaggerConfigError",
+    "YandexTaggerError",
+    "YandexTaggerSettings",
 ]
