@@ -16,6 +16,30 @@
 Новая миграция `0002_social` следует за `0001_catalog`; её откат к
 `0001_catalog` удаляет только пользовательские и социальные таблицы.
 
+## Получение событий KudaGo
+
+`integrations/kudago.py` содержит асинхронный `KudaGoClient` и чистый
+`normalize_event`. Клиент постранично следует по `next` ссылкам и отдаёт
+сырые карточки по одной. Нормализатор возвращает `EventDraft` с данными для
+`events`, `event_sources`, `places`, `event_images` и `event_schedules`.
+Он не пишет в БД: это обязанность будущего importer/repository.
+
+Пример:
+
+```python
+from integrations.kudago import KudaGoClient, normalize_event
+
+async with KudaGoClient() as client:
+    async for payload in client.iter_events(location="msk"):
+        draft = normalize_event(payload, city_id=city_id)
+        await repository.upsert_event(draft)
+```
+
+Клиент использует максимум 100 карточек на страницу, повторяет временные
+ошибки API, не следует по ссылкам на другой домен и не загружает весь каталог
+в память. `normalize_event` не придумывает цену, возраст или место: неизвестные
+значения остаются `None`, а полный ответ источника сохраняется в `raw_payload`.
+
 Репозитории впоследствии можно добавить в `infrastructure/db/repositories/`.
 Модели описывают хранение, репозитории выполняют запросы, сервисы управляют импортом.
 
