@@ -69,6 +69,10 @@ class YandexTaggerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sdk.model.configure_kwargs["temperature"], 0)
         self.assertEqual(sdk.model.configure_kwargs["max_tokens"], 256)
         self.assertEqual(sdk.model.configure_kwargs["response_format"]["name"], "event_tags")
+        self.assertEqual(
+            sdk.model.configure_kwargs["response_format"]["json_schema"]["properties"]["primary"]["maxItems"],
+            2,
+        )
         self.assertEqual(sdk.model.messages[0]["role"], "system")
         self.assertIn("Настольная вечеринка", sdk.model.messages[1]["text"])
         self.assertEqual(result.primary, ("party", "board_games"))
@@ -96,6 +100,22 @@ class YandexTaggerTests(unittest.IsolatedAsyncioTestCase):
         )
         async with YandexTagger(settings, sdk=sdk) as tagger:
             with self.assertRaisesRegex(YandexTaggerError, "unknown primary tag"):
+                await tagger.tag_text(title="Событие")
+
+    async def test_more_than_two_primary_tags_are_rejected(self):
+        response = SimpleNamespace(
+            text='{"primary":["party","board_games","festival"],"secondary":[]}',
+            usage=None,
+            model_version="test-version",
+        )
+        sdk = FakeSDK(response)
+        settings = YandexTaggerSettings(
+            api_key="test-key",
+            folder_id="folder",
+            model_uri="gpt://folder/yandexgpt-5-lite",
+        )
+        async with YandexTagger(settings, sdk=sdk) as tagger:
+            with self.assertRaisesRegex(YandexTaggerError, "more than 2 primary tags"):
                 await tagger.tag_text(title="Событие")
 
 
