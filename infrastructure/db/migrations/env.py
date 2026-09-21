@@ -1,11 +1,14 @@
 import os
 
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, pool
 
 from infrastructure.db import Base
 
 target_metadata = Base.metadata
+
+load_dotenv()
 
 
 def database_url() -> str:

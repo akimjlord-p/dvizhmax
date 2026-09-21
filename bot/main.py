@@ -31,6 +31,7 @@ async def _register_webhook(bot: Bot) -> None:
 async def main() -> None:
     load_dotenv()
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    transport = os.getenv("MAX_TRANSPORT", "webhook").strip().lower()
     bot = Bot()
     dispatcher = Dispatcher()
     engine = create_async_database_engine()
@@ -38,20 +39,27 @@ async def main() -> None:
     register_onboarding_handlers(dispatcher, session_factory)
     register_feed_handlers(dispatcher, session_factory)
     try:
-        try:
-            await _register_webhook(bot)
-        except Exception:
-            logging.getLogger(__name__).exception("Unable to register MAX webhook")
-        await dispatcher.handle_webhook(
-            bot,
-            host=os.getenv("MAX_WEBHOOK_HOST", "0.0.0.0"),
-            port=int(os.getenv("MAX_WEBHOOK_PORT", "8080")),
-            path=os.getenv("MAX_WEBHOOK_PATH", "/max/webhook"),
-            secret=os.getenv("MAX_WEBHOOK_SECRET", "").strip() or None,
-        )
+        if transport == "long_polling":
+            await dispatcher.start_polling(bot)
+        elif transport == "webhook":
+            try:
+                await _register_webhook(bot)
+            except Exception:
+                logging.getLogger(__name__).exception("Unable to register MAX webhook")
+            await dispatcher.handle_webhook(
+                bot,
+                host=os.getenv("MAX_WEBHOOK_HOST", "0.0.0.0"),
+                port=int(os.getenv("MAX_WEBHOOK_PORT", "8080")),
+                path=os.getenv("MAX_WEBHOOK_PATH", "/max/webhook"),
+                secret=os.getenv("MAX_WEBHOOK_SECRET", "").strip() or None,
+            )
+        else:
+            raise RuntimeError("MAX_TRANSPORT must be 'webhook' or 'long_polling'")
     finally:
         await engine.dispose()
 
 
 if __name__ == "__main__":
+    if os.name == "nt":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

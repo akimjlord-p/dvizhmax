@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Final
 
@@ -112,7 +113,10 @@ async def run_once(
 
     try:
         async with KudaGoClient() as kudago:
-            async for payload in kudago.iter_events(location=city_settings.location):
+            async for payload in kudago.iter_events(
+                location=city_settings.location,
+                actual_since=int(time.time()),
+            ):
                 try:
                     draft = normalize_event(payload, city_id=city_id)
                     async with session_factory() as session:
@@ -180,4 +184,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    if os.name == "nt":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

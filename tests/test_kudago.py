@@ -47,6 +47,12 @@ class KudaGoTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(draft.is_free)
         self.assertEqual(draft.images, ())
 
+    def test_normalize_event_with_unsupported_timestamp(self):
+        payload = {"id": 2, "title": "Event", "dates": [{"start": 253402300799, "end": 253402300799}]}
+        draft = normalize_event(payload, city_id=uuid4())
+        self.assertIsNone(draft.schedules[0].starts_at)
+        self.assertIsNone(draft.schedules[0].ends_at)
+
     async def test_iter_events_follows_next(self):
         requests = []
 
