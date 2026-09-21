@@ -16,7 +16,7 @@ from maxapi.types.attachments.attachment import Attachment, OtherAttachmentPaylo
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.cache.feed_buffer import FeedBufferStore
-from infrastructure.db.repositories import CompanionRepository, FeedRepository, OnboardingError, OnboardingRepository
+from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingError, OnboardingRepository
 from infrastructure.db.repositories.feed import EventCard
 from .navigation import menu, menu_rows, profile_offer
 from .notifications import send_match_notifications
@@ -81,7 +81,29 @@ def _buttons(
 
 def card_text(card: EventCard) -> str:
     parts = [card.title]
-    if card.starts_at is not None:
+    if card.schedule_state == "ongoing":
+        if card.ends_at is not None:
+            try:
+                local_end = card.ends_at.astimezone(ZoneInfo(card.city_timezone))
+            except Exception:
+                local_end = card.ends_at
+            parts.append(f"🗓 Идёт сейчас · до {local_end:%d.%m.%Y %H:%M}")
+        else:
+            parts.append("🗓 Идёт сейчас")
+    elif card.schedule_state == "recurring" and card.starts_at is not None:
+        try:
+            local = card.starts_at.astimezone(ZoneInfo(card.city_timezone))
+        except Exception:
+            local = card.starts_at
+        parts.append(f"🗓 Ближайший сеанс: {local:%d.%m.%Y %H:%M}")
+    elif card.schedule_state == "period" and card.starts_at is not None and card.ends_at is not None:
+        try:
+            local_start = card.starts_at.astimezone(ZoneInfo(card.city_timezone))
+            local_end = card.ends_at.astimezone(ZoneInfo(card.city_timezone))
+        except Exception:
+            local_start, local_end = card.starts_at, card.ends_at
+        parts.append(f"🗓 Период: {local_start:%d.%m.%Y} — {local_end:%d.%m.%Y}")
+    elif card.starts_at is not None:
         try:
             local = card.starts_at.astimezone(ZoneInfo(card.city_timezone))
         except Exception:
@@ -314,8 +336,13 @@ def register_feed_handlers(
 
     async def render_companion(answer, card) -> None:
         details = [card.name]
+        profile_details = []
+        if card.gender:
+            profile_details.append({"male": "Мужчина", "female": "Женщина"}.get(card.gender, card.gender))
         if card.age is not None:
-            details.append(f"{card.age} лет")
+            profile_details.append(f"{card.age} лет")
+        if profile_details:
+            details.append(", ".join(profile_details))
         if card.description:
             details.append(card.description)
         attachments = [
@@ -378,6 +405,27 @@ def register_feed_handlers(
             await event.message.answer("Сначала пройди старт: /start")
             return
         await browse(event.message.answer, user_id, event.bot, "plans")
+
+    @dispatcher.message_created(Command("demo"))
+    async def on_demo(event: MessageCreated) -> None:
+        sender = event.message.sender
+        if sender is None:
+            return
+        user_id = await user_uuid(sender.user_id)
+        if user_id is None:
+            await event.message.answer("Сначала пройди старт: /start")
+            return
+        user = await current_user(sender.user_id)
+        if user is None or user.profile_status != "active":
+            await event.message.answer("Для демо мэтча сначала создай анкету через /profile.")
+            return
+        async with session_factory() as session:
+            event_id = await DemoRepository(session).event_id()
+            card = await FeedRepository(session).buffered_card(user_id, event_id) if event_id else None
+        if card is None:
+            await event.message.answer("Демо ещё не подготовлено. Запусти seed на сервере.", attachments=menu())
+            return
+        await render_event_card(event.message.answer, card, bot=event.bot, mode="feed", heading="Демо мэтча")
 
     @dispatcher.message_callback(F.callback.payload.startswith("feed:"))
     async def on_feed_callback(event: MessageCallback) -> None:
@@ -444,6 +492,8 @@ def register_feed_handlers(
                 async with session_factory() as session:
                     repository = FeedRepository(session)
                     await repository.set_company_search(user_id, UUID(plan_raw), looking=choice == "yes")
+                    if choice == "yes":
+                        await DemoRepository(session).arm_reverse_interest(user_id=user_id, user_plan_id=UUID(plan_raw))
                     await session.commit()
                 if choice == "yes":
                     await show_companion(edit_current, user_id, UUID(plan_raw))

@@ -1,3 +1,5 @@
+from datetime import datetime, time, timezone
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -9,7 +11,7 @@ from maxapi.types.attachments.attachment import Attachment
 
 import bot.feed as feed_module
 from bot.feed import _buttons, _cached_image_attachment, _event_image_attachment, card_text
-from infrastructure.db.repositories.feed import EventCard, rank_cards, score_card
+from infrastructure.db.repositories.feed import EventCard, event_timing, rank_cards, score_card
 
 
 def card(
@@ -33,6 +35,8 @@ def card(
         data_status="current",
         source_url="https://example.test/event",
         starts_at=None,
+        ends_at=None,
+        schedule_state="unknown",
         image_url=image_url,
         image_id=None,
         max_attachment=None,
@@ -44,6 +48,41 @@ def card(
 
 
 class FeedRecommendationTests(unittest.IsolatedAsyncioTestCase):
+    def test_old_event_without_end_is_not_current(self):
+        schedule = SimpleNamespace(
+            starts_at=datetime(2014, 8, 9, tzinfo=timezone.utc),
+            ends_at=None,
+            is_endless=False,
+            is_startless=False,
+            recurrence=None,
+            start_time=None,
+            end_time=None,
+        )
+        self.assertIsNone(event_timing([schedule], datetime(2026, 9, 22, tzinfo=timezone.utc), "Europe/Moscow"))
+
+    def test_recurring_event_shows_the_next_session(self):
+        schedule = SimpleNamespace(
+            starts_at=datetime(2014, 8, 8, 20, tzinfo=timezone.utc),
+            ends_at=datetime(9999, 12, 31, 21, tzinfo=timezone.utc),
+            is_endless=True,
+            is_startless=False,
+            recurrence=[{"days_of_week": [1], "start_time": "10:00:00", "end_time": "20:00:00"}],
+            start_time=time(10),
+            end_time=time(20),
+        )
+        timing = event_timing([schedule], datetime(2026, 9, 22, 9, tzinfo=timezone.utc), "Europe/Moscow")
+        self.assertEqual((timing.state, timing.starts_at), ("recurring", datetime(2026, 9, 28, 7, tzinfo=timezone.utc)))
+
+    def test_ongoing_event_does_not_show_its_old_start_date(self):
+        event = replace(
+            card(score="0", primary="exhibition"),
+            starts_at=datetime(2026, 6, 11, 21, tzinfo=timezone.utc),
+            ends_at=datetime(2026, 10, 11, 21, tzinfo=timezone.utc),
+            schedule_state="ongoing",
+        )
+        result = card_text(event)
+        self.assertIn("Идёт сейчас", result)
+        self.assertNotIn("11.06.2026", result)
     def test_cached_max_image_attachment_is_reused(self):
         attachment = _cached_image_attachment({"type": "image", "payload": {"token": "token"}})
         self.assertIsNotNone(attachment)

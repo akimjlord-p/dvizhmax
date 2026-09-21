@@ -36,6 +36,16 @@ class OnboardingKeyboardTests(unittest.TestCase):
         attachment = categories_keyboard([Tag()], {tag_id})[0]
         self.assertTrue(attachment.payload.buttons[0][0].text.endswith(" · 1"))
 
+    def test_interest_group_shows_continue_after_three_choices(self):
+        tags = []
+        selected = set()
+        for _ in range(3):
+            tag_id = uuid4()
+            selected.add(tag_id)
+            tags.append(type("Tag", (), {"id": tag_id, "code": "concert", "name": "Concert"})())
+        attachment = interests_keyboard(tags, selected, "music_stage")[0]
+        self.assertIn("onboarding:interest:finish", [button.payload for row in attachment.payload.buttons for button in row])
+
 
 if __name__ == "__main__":
     unittest.main()

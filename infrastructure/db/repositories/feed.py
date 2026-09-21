@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +35,8 @@ class EventCard:
     data_status: str
     source_url: str
     starts_at: datetime | None
+    ends_at: datetime | None
+    schedule_state: str
     image_url: str | None
     image_id: UUID | None
     max_attachment: dict[str, Any] | None
@@ -278,6 +281,8 @@ class FeedRepository:
                     Event.tagging_status == "done",
                 ]
             )
+            if user.age is not None:
+                conditions.append(or_(Event.age_min.is_(None), Event.age_min <= user.age))
         if event_ids is not None:
             conditions.append(Event.id.in_(tuple(event_ids)))
         excluded_ids = tuple(excluded_event_ids)
@@ -318,9 +323,9 @@ class FeedRepository:
         cards: list[EventCard] = []
         for event_id, (event, place, source, city) in events.items():
             event_schedules = schedules.get(event_id, [])
-            if event_schedules and not has_upcoming_schedule(event_schedules, now):
+            timing = event_timing(event_schedules, now, city.timezone)
+            if feed_only and timing is None:
                 continue
-            starts_at = upcoming_schedule(event_schedules, now)
             tagged = tags_by_event.get(event_id, [])
             primary = frozenset(code for code, kind in tagged if kind == "primary")
             if not primary:
@@ -338,7 +343,9 @@ class FeedRepository:
                     is_free=event.is_free,
                     data_status=event.data_status,
                     source_url=source.source_url,
-                    starts_at=starts_at,
+                    starts_at=timing.starts_at if timing else None,
+                    ends_at=timing.ends_at if timing else None,
+                    schedule_state=timing.state if timing else "unknown",
                     image_url=image[1] if image else None,
                     image_id=image[0] if image else None,
                     max_attachment=image[2] if image else None,
@@ -454,20 +461,95 @@ class FeedRepository:
         return user
 
 
-def upcoming_schedule(schedules: list[EventSchedule], now: datetime) -> datetime | None:
-    valid = [
-        schedule
+@dataclass(frozen=True, slots=True)
+class EventTiming:
+    starts_at: datetime | None
+    ends_at: datetime | None
+    state: str
+
+
+def event_timing(
+    schedules: list[EventSchedule],
+    now: datetime,
+    timezone_name: str,
+) -> EventTiming | None:
+    """Return the next concrete session or the current active period."""
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception:
+        zone = timezone.utc
+    candidates = [
+        timing
         for schedule in schedules
-        if schedule.ends_at is None or schedule.ends_at >= now
+        if (timing := _schedule_timing(schedule, now, zone)) is not None
     ]
-    starts = [schedule.starts_at for schedule in valid if schedule.starts_at is not None]
-    if starts:
-        return min(starts)
+    if not candidates:
+        return None
+    active = [timing for timing in candidates if timing.state == "ongoing"]
+    if active:
+        return min(active, key=lambda timing: timing.ends_at or datetime.max.replace(tzinfo=timezone.utc))
+    return min(candidates, key=lambda timing: timing.starts_at or datetime.max.replace(tzinfo=timezone.utc))
+
+
+def _schedule_timing(schedule: EventSchedule, now: datetime, zone: ZoneInfo) -> EventTiming | None:
+    if isinstance(schedule.recurrence, list) and schedule.recurrence:
+        recurring = _recurring_timing(schedule, now, zone)
+        if recurring is not None:
+            return recurring
+
+    starts_at, ends_at = schedule.starts_at, schedule.ends_at
+    if ends_at is not None and ends_at < now:
+        return None
+    if starts_at is None:
+        return EventTiming(None, ends_at, "ongoing") if schedule.is_startless and ends_at else None
+    if starts_at > now:
+        state = "period" if ends_at and ends_at.date() > starts_at.date() else "upcoming"
+        return EventTiming(starts_at, ends_at, state)
+    if schedule.is_endless or ends_at is not None:
+        return EventTiming(starts_at, None if schedule.is_endless else ends_at, "ongoing")
     return None
 
 
-def has_upcoming_schedule(schedules: list[EventSchedule], now: datetime) -> bool:
-    return any(schedule.ends_at is None or schedule.ends_at >= now for schedule in schedules)
+def _recurring_timing(schedule: EventSchedule, now: datetime, zone: ZoneInfo) -> EventTiming | None:
+    local_now = now.astimezone(zone)
+    period_start = schedule.starts_at.astimezone(zone).date() if schedule.starts_at else None
+    period_end = None if schedule.is_endless or schedule.ends_at is None else schedule.ends_at.astimezone(zone)
+    candidates: list[EventTiming] = []
+    for rule in schedule.recurrence or []:
+        if not isinstance(rule, dict):
+            continue
+        days = {day for day in rule.get("days_of_week", []) if isinstance(day, int) and 1 <= day <= 7}
+        start_time = _rule_time(rule.get("start_time")) or schedule.start_time
+        end_time = _rule_time(rule.get("end_time")) or schedule.end_time
+        if not days or start_time is None:
+            continue
+        for offset in range(8):
+            occurrence_date = local_now.date() + timedelta(days=offset)
+            if occurrence_date.isoweekday() not in days or (period_start and occurrence_date < period_start):
+                continue
+            starts_local = datetime.combine(occurrence_date, start_time, tzinfo=zone)
+            ends_local = datetime.combine(occurrence_date, end_time, tzinfo=zone) if end_time else None
+            if ends_local is not None and ends_local <= starts_local:
+                ends_local += timedelta(days=1)
+            starts_at = starts_local.astimezone(timezone.utc)
+            ends_at = ends_local.astimezone(timezone.utc) if ends_local else None
+            if period_end is not None and starts_at > period_end.astimezone(timezone.utc):
+                continue
+            if ends_at is not None and starts_at <= now <= ends_at:
+                return EventTiming(starts_at, ends_at, "ongoing")
+            if starts_at > now:
+                candidates.append(EventTiming(starts_at, ends_at, "recurring"))
+                break
+    return min(candidates, key=lambda timing: timing.starts_at or datetime.max.replace(tzinfo=timezone.utc), default=None)
+
+
+def _rule_time(value: object) -> time | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return time.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def score_card(card: EventCard, weights: dict[str, Decimal]) -> Decimal:

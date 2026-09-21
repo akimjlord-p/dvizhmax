@@ -21,7 +21,7 @@ from .base import Base, Timestamps, UUIDPrimaryKey
 class User(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "users"
     __table_args__ = (
-        CheckConstraint("age BETWEEN 1 AND 120", name="age_range"),
+        CheckConstraint("age BETWEEN 18 AND 120", name="age_range"),
         CheckConstraint("profile_status IN ('guest', 'draft', 'active', 'hidden')", name="profile_status"),
         CheckConstraint(
             "profile_status != 'active' OR (name IS NOT NULL AND length(trim(name)) > 0 "

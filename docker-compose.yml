@@ -65,6 +65,20 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  demo-seed:
+    build:
+      context: .
+      dockerfile: Dockerfile.catalog-worker
+    command: ["python", "-m", "workers.demo_seed"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["tools"]
+    restart: "no"
+
 volumes:
   postgres_data:
   redis_data:

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from integrations.kudago import EventDraft
@@ -91,6 +91,44 @@ class CatalogRepository:
         run.created_count = created_count
         run.updated_count = updated_count
         run.error = error[:4000] if error else None
+
+    async def mark_unseen_events_uncertain(
+        self,
+        *,
+        source: str,
+        city_id: UUID,
+        seen_after: datetime,
+    ) -> None:
+        """Mark cards absent from a completed source scan as not confirmed."""
+        unseen_event_ids = select(EventSource.event_id).where(
+            EventSource.source == source,
+            EventSource.is_primary.is_(True),
+            EventSource.last_success_at < seen_after,
+        )
+        await self.session.execute(
+            update(Event)
+            .where(Event.city_id == city_id, Event.id.in_(unseen_event_ids), Event.data_status != "unavailable")
+            .values(data_status="uncertain")
+        )
+
+    async def mark_stale_events_unavailable(
+        self,
+        *,
+        source: str,
+        city_id: UUID,
+        stale_before: datetime,
+    ) -> None:
+        """Stop recommending cards the source has not confirmed for days."""
+        stale_event_ids = select(EventSource.event_id).where(
+            EventSource.source == source,
+            EventSource.is_primary.is_(True),
+            or_(EventSource.last_success_at.is_(None), EventSource.last_success_at < stale_before),
+        )
+        await self.session.execute(
+            update(Event)
+            .where(Event.city_id == city_id, Event.id.in_(stale_event_ids), Event.data_status != "unavailable")
+            .values(data_status="unavailable")
+        )
 
     async def upsert_event(self, draft: EventDraft) -> EventUpsertResult:
         now = datetime.now(timezone.utc)

@@ -20,6 +20,7 @@
 | `/liked` | Понравившиеся |
 | `/plans` | Мои планы и поиск компании |
 | `/profile` | Анкета |
+| `/demo` | Тестовый путь до мэтча |
 
 ## Стек
 
@@ -100,6 +101,12 @@ MAX_WEBHOOK_PORT=8080
 
 ```bash
 docker compose up -d --build
+```
+
+Для тестового сценария до мэтча после первой загрузки каталога:
+
+```bash
+docker compose --profile tools run --rm demo-seed
 ```
 
 ## TODO

@@ -17,6 +17,7 @@ class CompanionCard:
     plan_id: UUID
     user_id: UUID
     name: str
+    gender: str | None
     age: int | None
     description: str | None
     photo_url: str | None
@@ -80,6 +81,7 @@ class CompanionRepository:
             plan_id=candidate_plan.id,
             user_id=candidate.id,
             name=candidate.name or "Без имени",
+            gender=candidate.gender,
             age=candidate.age,
             description=candidate.description,
             photo_url=candidate.photo_url,

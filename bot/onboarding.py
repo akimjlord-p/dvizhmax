@@ -63,6 +63,8 @@ def interests_keyboard(tags: list[Tag], selected: set[UUID], group_code: str) ->
         [CallbackButton(text=f"{'✓ ' if tag.id in selected else ''}{tag.name}", payload=f"onboarding:interest:{tag.id}") for tag in group_tags[i:i + 2]]
         for i in range(0, len(group_tags), 2)
     ]
+    if len(selected) >= MIN_INTERESTS:
+        rows.append([CallbackButton(text="Продолжить", payload="onboarding:interest:finish")])
     rows.append([CallbackButton(text="← К категориям", payload="onboarding:interest_group:back")])
     return keyboard(rows)
 
@@ -108,7 +110,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             await answer("Для поиска компании нужна анкета. Хочешь её создать? Твои планы и интересы сохранятся.", attachments=profile_offer())
             return
         fields = (("name", "Имя"), ("gender", "Пол"), ("age", "Возраст"),
-                  ("description", "Описание"), ("photo", "Фото"), ("city", "Город"), ("interests", "Интересы"))
+                  ("description", "Описание"), ("photo", "Фото"), ("interests", "Интересы"))
         gender = {"male": "Мужской", "female": "Женский"}.get(user.gender, user.gender)
         text = (f"Твоя анкета\n\n{user.name}, {user.age}\nПол: {gender}\n"
                 f"Город: {city.name if city else 'не выбран'}\n"
@@ -148,8 +150,21 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 attachments=keyboard([[CallbackButton(text="Согласен", payload="onboarding:consent:accept")], [CallbackButton(text="Не согласен", payload="onboarding:consent:decline")]]),
             )
         elif user.city_id is None or step == "city":
-            await prompt("Выбери город." if cities else "Каталог городов ещё обновляется. Попробуй чуть позже.",
-                         [[CallbackButton(text=city.name, payload=f"onboarding:city:{city.id}")] for city in cities])
+            if len(cities) == 1 and not editing:
+                async with session_factory() as session:
+                    await OnboardingRepository(session).choose_city(uid, cities[0].id)
+                    await session.commit()
+                await answer(
+                    "Пока ДвижМАКС работает только в Москве. Город сохранён.\n\n"
+                    "Хочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша.",
+                    attachments=keyboard([
+                        [CallbackButton(text="Создать профиль", payload="onboarding:profile:create")],
+                        [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")],
+                    ]),
+                )
+            else:
+                await prompt("Выбери город." if cities else "Каталог мероприятий ещё обновляется. Попробуй чуть позже.",
+                             [[CallbackButton(text=city.name, payload=f"onboarding:city:{city.id}")] for city in cities])
         elif step == "profile_choice":
             await answer("Город сохранён.\n\nХочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша.", attachments=keyboard([[CallbackButton(text="Создать профиль", payload="onboarding:profile:create")], [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")]]))
         elif step == "name":
@@ -157,7 +172,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
         elif step == "gender":
             await prompt("Выбери пол.", [[CallbackButton(text="Мужской", payload="onboarding:gender:male")], [CallbackButton(text="Женский", payload="onboarding:gender:female")]])
         elif step == "age":
-            await prompt("Сколько тебе лет? Напиши число.")
+            await prompt("Сколько тебе лет? ДвижМАКС работает для пользователей от 18 лет.")
         elif step == "description":
             await prompt("Расскажи о себе в паре фраз. Это увидят люди, которые ищут компанию.", [[CallbackButton(text="Очистить описание" if editing else "Пропустить", payload="onboarding:description:skip")]])
         elif step == "photo":
@@ -217,8 +232,20 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                     repo = OnboardingRepository(session)
                     await repo.accept_consent(uid, consent_version)
                     cities = await repo.list_cities()
+                    if len(cities) == 1:
+                        await repo.choose_city(uid, cities[0].id)
                     await session.commit()
-                await event.edit("Выбери город." if cities else "Каталог городов ещё обновляется. Попробуй чуть позже.", attachments=city_keyboard(cities) if cities else [])
+                if len(cities) == 1:
+                    await event.edit(
+                        "Пока ДвижМАКС работает только в Москве. Город сохранён.\n\n"
+                        "Хочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша.",
+                        attachments=keyboard([
+                            [CallbackButton(text="Создать профиль", payload="onboarding:profile:create")],
+                            [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")],
+                        ]),
+                    )
+                else:
+                    await event.edit("Выбери город." if cities else "Каталог мероприятий ещё обновляется. Попробуй чуть позже.", attachments=city_keyboard(cities) if cities else [])
                 return
             if action == "city":
                 async with session_factory() as session:

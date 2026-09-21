@@ -7,6 +7,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Final
 
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ from integrations.yandex_tagger import _TAG_LABELS as TAG_LABELS
 
 LOGGER: Final = logging.getLogger(__name__)
 REFRESH_INTERVAL_SECONDS: Final = 12 * 60 * 60
+SOURCE_STALE_AFTER: Final = timedelta(days=3)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +106,7 @@ async def run_once(
 
     created = updated = failed = 0
     run_error: Exception | None = None
+    refresh_started_at = datetime.now(timezone.utc)
     tagger: YandexTagger | None
     try:
         tagger = YandexTagger()
@@ -147,7 +150,19 @@ async def run_once(
         LOGGER.exception("KudaGo refresh failed")
     finally:
         async with session_factory() as session:
-            await CatalogRepository(session).finish_import_run(
+            repository = CatalogRepository(session)
+            if run_error is None:
+                await repository.mark_unseen_events_uncertain(
+                    source="kudago",
+                    city_id=city_id,
+                    seen_after=refresh_started_at,
+                )
+            await repository.mark_stale_events_unavailable(
+                source="kudago",
+                city_id=city_id,
+                stale_before=datetime.now(timezone.utc) - SOURCE_STALE_AFTER,
+            )
+            await repository.finish_import_run(
                 run_id,
                 status="failed" if run_error else "succeeded",
                 created_count=created,
