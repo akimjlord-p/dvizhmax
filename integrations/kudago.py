@@ -104,7 +104,7 @@ class KudaGoClient:
         *,
         client: httpx.AsyncClient | None = None,
         base_url: str = KUDAGO_BASE_URL,
-        timeout: float = 20.0,
+        timeout: float = 60.0,
         max_retries: int = 2,
         retry_delay: float = 0.5,
     ) -> None:
