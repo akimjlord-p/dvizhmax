@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from maxapi import Bot, Dispatcher, F
 from maxapi.enums import UploadType
-from maxapi.types import AttachmentUpload, ButtonsPayload, CallbackButton, Command, InputMediaBuffer, MessageCallback, MessageCreated
+from maxapi.types import AttachmentUpload, ButtonsPayload, CallbackButton, Command, InputMediaBuffer, LinkButton, MessageCallback, MessageCreated
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.cache.feed_buffer import FeedBufferStore
@@ -37,7 +37,6 @@ def _buttons(
     mode: str,
     index: int = 0,
     total: int = 1,
-    show_description: bool = False,
 ) -> list:
     if mode == "liked":
         rows = [
@@ -62,14 +61,7 @@ def _buttons(
             ],
             [CallbackButton(text="Пойду", payload=f"feed:want:{card.id}")],
         ]
-    if card.description and card.description.strip():
-        description_label = "Скрыть описание" if show_description else "Описание"
-        rows.append([
-            CallbackButton(
-                text=description_label,
-                payload=f"feed:description:{card.id}|{mode}|{index}|{int(show_description)}",
-            )
-        ])
+    rows.append([LinkButton(text="Подробнее", url=card.source_url)])
     if mode != "feed":
         navigation = []
         if index > 0:
@@ -81,7 +73,7 @@ def _buttons(
     return [ButtonsPayload(buttons=rows + menu_rows()).pack()]
 
 
-def card_text(card: EventCard, *, show_description: bool = False) -> str:
+def card_text(card: EventCard) -> str:
     parts = [card.title]
     if card.starts_at is not None:
         try:
@@ -102,10 +94,6 @@ def card_text(card: EventCard, *, show_description: bool = False) -> str:
         parts.append("💸 Цена уточняется")
     if card.data_status == "uncertain":
         parts.append("⚠️ Данные могут быть неактуальны — проверь их по ссылке.")
-    if show_description and card.description:
-        description = card.description.strip()
-        parts.append(description[:500] + ("…" if len(description) > 500 else ""))
-    parts.append(f"Подробнее: {card.source_url}")
     return "\n\n".join(parts)
 
 
@@ -164,7 +152,6 @@ async def _attachments(
     mode: str,
     index: int = 0,
     total: int = 1,
-    show_description: bool = False,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list:
@@ -173,7 +160,6 @@ async def _attachments(
         mode=mode,
         index=index,
         total=total,
-        show_description=show_description,
     )
     image = await _event_image_attachment(card, bot=bot, session_factory=session_factory)
     if image is not None:
@@ -251,10 +237,9 @@ def register_feed_handlers(
         mode: str,
         index: int = 0,
         total: int = 1,
-        show_description: bool = False,
         heading: str | None = None,
     ) -> None:
-        text = card_text(card, show_description=show_description)
+        text = card_text(card)
         if heading is not None:
             text = f"{heading} · {index + 1}/{total}\n\n{text}"
         await answer(
@@ -264,7 +249,6 @@ def register_feed_handlers(
                 mode=mode,
                 index=index,
                 total=total,
-                show_description=show_description,
                 bot=bot,
                 session_factory=session_factory,
             ),
@@ -301,51 +285,6 @@ def register_feed_handlers(
             total=len(cards),
             heading=title,
         )
-
-    async def toggle_description(
-        answer,
-        user_id: UUID,
-        bot: Bot,
-        *,
-        event_id: UUID,
-        mode: str,
-        index: int,
-        show_description: bool,
-    ) -> None:
-        if mode == "feed":
-            async with session_factory() as session:
-                card = await FeedRepository(session).buffered_card(user_id, event_id)
-            if card is None:
-                raise OnboardingError("Мероприятие больше недоступно")
-            await render_event_card(
-                answer,
-                card,
-                bot=bot,
-                mode=mode,
-                show_description=show_description,
-            )
-            return
-
-        if mode not in {"liked", "plans"}:
-            raise OnboardingError("Неизвестный раздел")
-        async with session_factory() as session:
-            repository = FeedRepository(session)
-            cards = await repository.liked_cards(user_id) if mode == "liked" else await repository.planned_cards(user_id)
-        for current_index, card in enumerate(cards):
-            if card.id == event_id:
-                title = "Понравившиеся" if mode == "liked" else "Мои планы"
-                await render_event_card(
-                    answer,
-                    card,
-                    bot=bot,
-                    mode=mode,
-                    index=current_index,
-                    total=len(cards),
-                    show_description=show_description,
-                    heading=title,
-                )
-                return
-        raise OnboardingError("Мероприятие больше недоступно")
 
     async def show_companion(answer, user_id: UUID, plan_id: UUID) -> None:
         async with session_factory() as session:
@@ -445,19 +384,6 @@ def register_feed_handlers(
             if action == "browse":
                 mode, index = value.split("|")
                 await browse(edit_current, user_id, event.bot, mode, int(index))
-            elif action == "description":
-                event_raw, mode, index, was_shown = value.split("|")
-                if was_shown not in {"0", "1"}:
-                    raise ValueError("Некорректное состояние описания")
-                await toggle_description(
-                    edit_current,
-                    user_id,
-                    event.bot,
-                    event_id=UUID(event_raw),
-                    mode=mode,
-                    index=int(index),
-                    show_description=was_shown == "0",
-                )
             elif action in {"like", "skip"}:
                 async with session_factory() as session:
                     repository = FeedRepository(session)

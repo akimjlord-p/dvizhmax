@@ -2,7 +2,9 @@ from decimal import Decimal
 from uuid import uuid4
 import unittest
 
-from bot.feed import _cached_image_attachment, card_text
+from maxapi.types import LinkButton
+
+from bot.feed import _buttons, _cached_image_attachment, card_text
 from infrastructure.db.repositories.feed import EventCard, rank_cards, score_card
 
 
@@ -74,12 +76,14 @@ class FeedRecommendationTests(unittest.TestCase):
     def test_card_text_contains_event_details(self):
         result = card_text(card(score="0", primary="concert"))
         self.assertIn("Event", result)
-        self.assertIn("https://example.test/event", result)
+        self.assertNotIn("https://example.test/event", result)
 
-    def test_card_description_is_hidden_until_requested(self):
+    def test_card_hides_description_and_has_source_link_button(self):
         event = card(score="0", primary="concert", description="Long <event> description")
         self.assertNotIn("Long <event> description", card_text(event))
-        self.assertIn("Long <event> description", card_text(event, show_description=True))
+        buttons = _buttons(event, mode="feed")[0].payload.buttons
+        link = next(button for row in buttons for button in row if isinstance(button, LinkButton))
+        self.assertEqual((link.text, link.url), ("Подробнее", event.source_url))
 
 if __name__ == "__main__":
     unittest.main()
