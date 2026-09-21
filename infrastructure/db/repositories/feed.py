@@ -5,7 +5,7 @@ import random
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Iterable
+from typing import Any, Iterable
 from uuid import UUID
 
 from sqlalchemy import and_, exists, func, or_, select, update
@@ -35,6 +35,8 @@ class EventCard:
     source_url: str
     starts_at: datetime | None
     image_url: str | None
+    image_id: UUID | None
+    max_attachment: dict[str, Any] | None
     primary_codes: frozenset[str]
     tag_codes: frozenset[str]
     tag_kinds: tuple[tuple[str, str], ...]
@@ -65,6 +67,35 @@ class FeedRepository:
             prior_primary_tags=history,
         )
         return ranked[0] if ranked else None
+
+    async def next_cards(
+        self,
+        user_id: UUID,
+        *,
+        limit: int,
+        excluded_event_ids: Iterable[UUID] = (),
+    ) -> list[EventCard]:
+        """Build an ordered page of unseen cards for a feed buffer."""
+        if limit <= 0:
+            return []
+        cards, weights, reaction_count, history = await self._candidate_cards(
+            user_id,
+            excluded_event_ids=excluded_event_ids,
+        )
+        return rank_cards(
+            cards,
+            weights=weights,
+            reaction_count=reaction_count,
+            prior_primary_tags=history,
+        )[:limit]
+
+    async def buffered_card(self, user_id: UUID, event_id: UUID) -> EventCard | None:
+        cards, _, _, _ = await self._candidate_cards(
+            user_id,
+            event_ids=(event_id,),
+            include_reacted=False,
+        )
+        return cards[0] if cards else None
 
     async def liked_cards(self, user_id: UUID) -> list[EventCard]:
         user = await self._require_user(user_id)
@@ -224,6 +255,11 @@ class FeedRepository:
             raise OnboardingError("Plan is unavailable")
         plan.company_status = "looking" if looking else "not_looking"
 
+    async def save_image_attachment(self, image_id: UUID, attachment: dict[str, Any]) -> None:
+        image = await self.session.get(EventImage, image_id)
+        if image is not None:
+            image.max_attachment = attachment
+
     async def _candidate_cards(
         self,
         user_id: UUID,
@@ -231,9 +267,10 @@ class FeedRepository:
         event_ids: Iterable[UUID] | None = None,
         include_reacted: bool = False,
         feed_only: bool = True,
+        excluded_event_ids: Iterable[UUID] = (),
     ) -> tuple[list[EventCard], dict[str, Decimal], int, list[frozenset[str]]]:
         user = await self._require_user(user_id)
-        conditions = [Event.city_id == user.city_id] if event_ids is None else []
+        conditions = [Event.city_id == user.city_id]
         if feed_only:
             conditions.extend(
                 [
@@ -243,6 +280,9 @@ class FeedRepository:
             )
         if event_ids is not None:
             conditions.append(Event.id.in_(tuple(event_ids)))
+        excluded_ids = tuple(excluded_event_ids)
+        if excluded_ids:
+            conditions.append(Event.id.not_in(excluded_ids))
         if not include_reacted:
             conditions.append(
                 ~exists(
@@ -285,6 +325,7 @@ class FeedRepository:
             primary = frozenset(code for code, kind in tagged if kind == "primary")
             if not primary:
                 continue
+            image = images.get(event_id)
             cards.append(
                 EventCard(
                     id=event.id,
@@ -298,7 +339,9 @@ class FeedRepository:
                     data_status=event.data_status,
                     source_url=source.source_url,
                     starts_at=starts_at,
-                    image_url=images.get(event_id),
+                    image_url=image[1] if image else None,
+                    image_id=image[0] if image else None,
+                    max_attachment=image[2] if image else None,
                     primary_codes=primary,
                     tag_codes=frozenset(code for code, _ in tagged),
                     tag_kinds=tuple(tagged),
@@ -325,18 +368,21 @@ class FeedRepository:
             result.setdefault(event_id, []).append((code, kind))
         return result
 
-    async def _images_by_event(self, event_ids: tuple[UUID, ...]) -> dict[UUID, str]:
+    async def _images_by_event(
+        self,
+        event_ids: tuple[UUID, ...],
+    ) -> dict[UUID, tuple[UUID, str, dict[str, Any] | None]]:
         rows = (
             await self.session.execute(
-                select(EventSource.event_id, EventImage.url)
+                select(EventSource.event_id, EventImage.id, EventImage.url, EventImage.max_attachment)
                 .join(EventImage, EventImage.event_source_id == EventSource.id)
                 .where(EventSource.event_id.in_(event_ids))
                 .order_by(EventSource.event_id, EventImage.position)
             )
         ).all()
-        result: dict[UUID, str] = {}
-        for event_id, url in rows:
-            result.setdefault(event_id, url)
+        result: dict[UUID, tuple[UUID, str, dict[str, Any] | None]] = {}
+        for event_id, image_id, url, max_attachment in rows:
+            result.setdefault(event_id, (image_id, url, max_attachment))
         return result
 
     async def _schedules_by_event(self, event_ids: tuple[UUID, ...]) -> dict[UUID, list[EventSchedule]]:

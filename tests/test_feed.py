@@ -2,16 +2,22 @@ from decimal import Decimal
 from uuid import uuid4
 import unittest
 
-from bot.feed import card_text
+from bot.feed import _cached_image_attachment, card_text
 from infrastructure.db.repositories.feed import EventCard, rank_cards, score_card
 
 
-def card(*, score: str, primary: str, tags: tuple[tuple[str, str], ...] | None = None) -> EventCard:
+def card(
+    *,
+    score: str,
+    primary: str,
+    tags: tuple[tuple[str, str], ...] | None = None,
+    description: str | None = None,
+) -> EventCard:
     tagged = tags or ((primary, "primary"),)
     return EventCard(
         id=uuid4(),
         title="Event",
-        description=None,
+        description=description,
         city_timezone="Europe/Moscow",
         place_name=None,
         place_address=None,
@@ -21,6 +27,8 @@ def card(*, score: str, primary: str, tags: tuple[tuple[str, str], ...] | None =
         source_url="https://example.test/event",
         starts_at=None,
         image_url=None,
+        image_id=None,
+        max_attachment=None,
         primary_codes=frozenset({primary}),
         tag_codes=frozenset(code for code, _ in tagged),
         tag_kinds=tagged,
@@ -29,6 +37,12 @@ def card(*, score: str, primary: str, tags: tuple[tuple[str, str], ...] | None =
 
 
 class FeedRecommendationTests(unittest.TestCase):
+    def test_cached_max_image_attachment_is_reused(self):
+        attachment = _cached_image_attachment({"type": "image", "payload": {"token": "token"}})
+        self.assertIsNotNone(attachment)
+        self.assertEqual(attachment.payload.token, "token")
+        self.assertIsNone(_cached_image_attachment({"type": "file", "payload": {"token": "token"}}))
+
     def test_primary_weight_is_more_important_than_secondary(self):
         event = card(
             score="0",
@@ -61,6 +75,10 @@ class FeedRecommendationTests(unittest.TestCase):
         result = card_text(card(score="0", primary="concert"))
         self.assertIn("Event", result)
         self.assertIn("https://example.test/event", result)
+
+    def test_card_description_is_shown(self):
+        event = card(score="0", primary="concert", description="Long <event> description")
+        self.assertIn("Long <event> description", card_text(event))
 
 if __name__ == "__main__":
     unittest.main()
