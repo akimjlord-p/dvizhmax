@@ -47,6 +47,13 @@ class SchemaRecorder:
         table = self.metadata.tables[table_name]
         table.append_constraint(sa.CheckConstraint(condition, name=name))
 
+    def add_column(self, table_name, column):
+        self.metadata.tables[table_name].append_column(column)
+
+    def execute(self, statement):
+        # Data migration behavior is exercised against PostgreSQL separately.
+        pass
+
 
 def ddl(metadata):
     dialect = postgresql.dialect()
@@ -84,6 +91,14 @@ class SchemaTests(unittest.TestCase):
         self.assertIn('FOREIGN KEY(recipient_plan_id, event_id)', sql)
         self.assertIn('first_user_id < second_user_id', sql)
         self.assertIn('CREATE UNIQUE INDEX uq_notifications_pending_digest', sql)
+        self.assertIn('DROP CONSTRAINT ck_users_active_profile_complete;', sql)
+        self.assertNotIn('ck_users_ck_users_', sql)
+        self.assertIn('ADD COLUMN reacted_at TIMESTAMP WITH TIME ZONE', sql)
+        output.seek(0)
+        output.truncate()
+        command.downgrade(config, '0004_profile_photo_optional:0003_multiple_primary_tags', sql=True)
+        self.assertIn('DROP CONSTRAINT ck_users_active_profile_complete;', output.getvalue())
+        self.assertNotIn('ck_users_ck_users_', output.getvalue())
         output.seek(0)
         output.truncate()
         command.downgrade(config, '0002_social:0001_catalog', sql=True)

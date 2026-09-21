@@ -22,10 +22,10 @@ _WITH_PHOTO = (
 
 
 def upgrade() -> None:
-    op.drop_constraint("ck_users_active_profile_complete", "users", type_="check")
-    op.create_check_constraint("ck_users_active_profile_complete", "users", _WITHOUT_PHOTO)
+    op.drop_constraint(op.f("ck_users_active_profile_complete"), "users", type_="check")
+    op.create_check_constraint(op.f("ck_users_active_profile_complete"), "users", _WITHOUT_PHOTO)
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_users_active_profile_complete", "users", type_="check")
-    op.create_check_constraint("ck_users_active_profile_complete", "users", _WITH_PHOTO)
+    op.drop_constraint(op.f("ck_users_active_profile_complete"), "users", type_="check")
+    op.create_check_constraint(op.f("ck_users_active_profile_complete"), "users", _WITH_PHOTO)

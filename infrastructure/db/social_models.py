@@ -119,6 +119,7 @@ class CompanionView(Base):
     event_id: Mapped[UUID] = mapped_column(ForeignKey("events.id"), primary_key=True)
     shown_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     shown_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CompanionInterest(UUIDPrimaryKey, Timestamps, Base):
