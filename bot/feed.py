@@ -18,6 +18,7 @@ from infrastructure.cache.feed_buffer import FeedBufferStore
 from infrastructure.db.repositories import CompanionRepository, FeedRepository, OnboardingError, OnboardingRepository
 from infrastructure.db.repositories.feed import EventCard
 from .navigation import menu, menu_rows, profile_offer
+from .notifications import send_match_notifications
 
 MAX_EVENT_IMAGE_BYTES = 5 * 1024 * 1024
 FEED_BUFFER_SIZE = 6
@@ -378,7 +379,14 @@ def register_feed_handlers(
             return
 
         async def edit_current(text=None, *, attachments=None, format=None) -> None:
-            await event.edit(text, attachments=attachments, format=format)
+            if event.message is None:
+                await event.edit(text, attachments=attachments, format=format)
+                return
+            message = event._require_message()
+            await asyncio.gather(
+                event.ack(),
+                message.edit(text, attachments=attachments, format=format, notify=False),
+            )
 
         try:
             if action == "browse":
@@ -438,8 +446,9 @@ def register_feed_handlers(
                     )
                     await session.commit()
                 if result.match_id is not None:
+                    await send_match_notifications(event.bot, session_factory, result.match_id)
                     await edit_current(
-                        "У вас взаимный интерес! Скоро здесь добавим общий чат для договорённости.",
+                        "У вас мэтч! Мы отправили вам обоим ссылки на профили MAX.",
                         attachments=menu(),
                     )
                 else:

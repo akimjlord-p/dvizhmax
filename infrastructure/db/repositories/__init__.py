@@ -3,6 +3,7 @@
 from .catalog import CatalogRepository, EventUpsertResult
 from .companions import CompanionRepository
 from .feed import FeedRepository
+from .notifications import NotificationRepository
 from .onboarding import OnboardingError, OnboardingRepository
 
 __all__ = [
@@ -10,6 +11,7 @@ __all__ = [
     "CompanionRepository",
     "EventUpsertResult",
     "FeedRepository",
+    "NotificationRepository",
     "OnboardingError",
     "OnboardingRepository",
 ]

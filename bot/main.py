@@ -10,6 +10,7 @@ from maxapi import Bot, Dispatcher
 from maxapi.enums import UpdateType
 
 from bot.feed import register_feed_handlers
+from bot.notifications import run_interest_digest_loop
 from bot.onboarding import register_onboarding_handlers
 from infrastructure.db.session import create_async_database_engine, create_session_factory
 
@@ -38,6 +39,10 @@ async def main() -> None:
     session_factory = create_session_factory(engine)
     register_onboarding_handlers(dispatcher, session_factory)
     register_feed_handlers(dispatcher, session_factory)
+    interest_digest_task = asyncio.create_task(
+        run_interest_digest_loop(bot, session_factory),
+        name="interest-digest",
+    )
     try:
         if transport == "long_polling":
             await dispatcher.start_polling(bot)
@@ -56,6 +61,11 @@ async def main() -> None:
         else:
             raise RuntimeError("MAX_TRANSPORT must be 'webhook' or 'long_polling'")
     finally:
+        interest_digest_task.cancel()
+        try:
+            await interest_digest_task
+        except asyncio.CancelledError:
+            pass
         await engine.dispose()
 
 
