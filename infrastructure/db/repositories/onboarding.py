@@ -124,7 +124,7 @@ class OnboardingRepository:
         self._advance(user, "gender")
 
     async def set_gender(self, user_id: UUID, value: str) -> None:
-        if value not in {"male", "female", "other"}:
+        if value not in {"male", "female"}:
             raise OnboardingError("Некорректный вариант пола")
         user = await self._require_step(user_id, "gender")
         user.gender = value

@@ -109,7 +109,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             return
         fields = (("name", "Имя"), ("gender", "Пол"), ("age", "Возраст"),
                   ("description", "Описание"), ("photo", "Фото"), ("city", "Город"), ("interests", "Интересы"))
-        gender = {"male": "Мужской", "female": "Женский", "other": "Другой"}.get(user.gender, user.gender)
+        gender = {"male": "Мужской", "female": "Женский"}.get(user.gender, user.gender)
         text = (f"Твоя анкета\n\n{user.name}, {user.age}\nПол: {gender}\n"
                 f"Город: {city.name if city else 'не выбран'}\n"
                 f"О себе: {user.description or 'не заполнено'}\n"
@@ -155,7 +155,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
         elif step == "name":
             await prompt("Как тебя зовут? Это имя увидят другие люди.")
         elif step == "gender":
-            await prompt("Выбери пол.", [[CallbackButton(text="Мужской", payload="onboarding:gender:male")], [CallbackButton(text="Женский", payload="onboarding:gender:female")], [CallbackButton(text="Другой", payload="onboarding:gender:other")]])
+            await prompt("Выбери пол.", [[CallbackButton(text="Мужской", payload="onboarding:gender:male")], [CallbackButton(text="Женский", payload="onboarding:gender:female")]])
         elif step == "age":
             await prompt("Сколько тебе лет? Напиши число.")
         elif step == "description":

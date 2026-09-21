@@ -205,13 +205,13 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_profile_edit_saves_field_without_restarting_onboarding(self):
         await self.click("onboarding:edit:gender")
-        result = await self.click("onboarding:gender:other")
+        result = await self.click("onboarding:gender:female")
         self.assertIn("onboarding:edit:photo", payloads(result.call_args.kwargs["attachments"]))
         await self.click("onboarding:edit:photo")
         await self.click("onboarding:photo:skip")
         async with self.factory() as session:
             user = await session.get(User, self.user.id)
-            self.assertEqual((user.gender, user.onboarding_step, user.profile_status), ("other", "complete", "active"))
+            self.assertEqual((user.gender, user.onboarding_step, user.profile_status), ("female", "complete", "active"))
             self.assertIsNone(user.photo_attachment)
             self.assertEqual(len(await OnboardingRepository(session).selected_interest_ids(user.id)), 3)
 
