@@ -8,6 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bot ./bot
 COPY infrastructure ./infrastructure
 COPY integrations ./integrations
+COPY assets ./assets
+COPY alembic.ini ./
 
 EXPOSE 8080
 

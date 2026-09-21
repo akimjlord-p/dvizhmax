@@ -87,15 +87,20 @@ python -m alembic check
 
 ## Деплой
 
-Для бота и каталога подготовлены отдельные Dockerfile:
+`docker-compose.yml` поднимает отдельные контейнеры PostgreSQL, Redis, миграций, бота и обновления каталога. В продакшн-файле `.env` нужно задать `POSTGRES_PASSWORD`, `DATABASE_URL` с тем же паролем, токены и MAX webhook:
 
-```bash
-docker build -f Dockerfile.bot -t dvizhmax-bot .
-docker build -f Dockerfile.catalog-worker -t dvizhmax-catalog-worker .
+```env
+MAX_TRANSPORT=webhook
+MAX_WEBHOOK_URL=https://akimjlord.space/max/webhook
+MAX_WEBHOOK_PATH=/max/webhook
+MAX_WEBHOOK_PORT=8080
 ```
 
-Оба контейнера используют общую PostgreSQL и переменные из `.env`.
-Бот слушает порт `8080`; HTTPS-прокси должен направлять webhook на этот порт.
+Бот публикует только `127.0.0.1:8080`; Nginx должен проксировать `/max/webhook` на этот адрес. Запуск:
+
+```bash
+docker compose up -d --build
+```
 
 ## TODO
 
