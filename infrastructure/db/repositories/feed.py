@@ -10,6 +10,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Place, Tag
@@ -172,23 +173,29 @@ class FeedRepository:
             if plan.event_id in cards_by_id
         ]
 
-    async def record_reaction(self, user_id: UUID, event_id: UUID, reaction: str) -> None:
+    async def record_reaction(self, user_id: UUID, event_id: UUID, reaction: str) -> bool:
+        """Record an event reaction once and report whether this callback changed state."""
         if reaction not in {"like", "skip"}:
             raise OnboardingError("Unsupported event reaction")
-        user = await self._require_user(user_id)
+        user = await self._lock_user(user_id)
         event = await self.session.get(Event, event_id)
         if event is None or event.city_id != user.city_id:
             raise OnboardingError("This event is unavailable")
-        existing = await self.session.get(EventReaction, (user.id, event_id))
-        if existing is not None:
-            raise OnboardingError("This event has already been evaluated")
-        self.session.add(EventReaction(user_id=user.id, event_id=event_id, reaction=reaction))
+        inserted = await self.session.scalar(
+            insert(EventReaction)
+            .values(user_id=user.id, event_id=event_id, reaction=reaction)
+            .on_conflict_do_nothing(index_elements=(EventReaction.user_id, EventReaction.event_id))
+            .returning(EventReaction.event_id)
+        )
+        if inserted is None:
+            return False
         if reaction == "like":
             await self._change_event_tag_weights(user.id, event_id, LIKE_WEIGHT_DELTA)
+        return True
 
     async def want_to_go(self, user_id: UUID, event_id: UUID) -> WantToGoResult:
         """Create a plan and record implicit positive intent when needed."""
-        user = await self._require_user(user_id)
+        user = await self._lock_user(user_id)
         event = await self.session.get(Event, event_id)
         reaction = await self.session.get(EventReaction, (user.id, event_id))
         if event is None or (event.city_id != user.city_id and (reaction is None or reaction.reaction != "like")):
@@ -215,6 +222,7 @@ class FeedRepository:
         return WantToGoResult(plan_id=plan.id, was_created=True)
 
     async def remove_like(self, user_id: UUID, event_id: UUID) -> None:
+        await self._lock_user(user_id)
         reaction = await self.session.get(EventReaction, (user_id, event_id))
         if reaction is None or reaction.reaction != "like":
             return
@@ -228,6 +236,7 @@ class FeedRepository:
             await self._change_event_tag_weights(user_id, event_id, -LIKE_WEIGHT_DELTA)
 
     async def cancel_plan(self, user_id: UUID, plan_id: UUID) -> None:
+        await self._lock_user(user_id)
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id:
             raise OnboardingError("План недоступен")
@@ -250,7 +259,7 @@ class FeedRepository:
         ).values(status="closed"))
 
     async def set_company_search(self, user_id: UUID, plan_id: UUID, *, looking: bool) -> None:
-        user = await self._require_user(user_id)
+        user = await self._lock_user(user_id)
         if looking and user.profile_status != "active":
             raise OnboardingError("Complete your profile before searching for company")
         plan = await self.session.get(EventPlan, plan_id)
@@ -441,21 +450,32 @@ class FeedRepository:
             ).all()
         )
         for tag_id in tag_ids:
-            weight = await self.session.get(UserTagWeight, (user_id, tag_id))
-            if weight is None:
-                self.session.add(
-                    UserTagWeight(
-                        user_id=user_id,
-                        tag_id=tag_id,
-                        initial_weight=Decimal("0"),
-                        reaction_weight=delta,
-                    )
+            await self.session.execute(
+                insert(UserTagWeight)
+                .values(
+                    user_id=user_id,
+                    tag_id=tag_id,
+                    initial_weight=Decimal("0"),
+                    reaction_weight=delta,
                 )
-            else:
-                weight.reaction_weight += delta
+                .on_conflict_do_update(
+                    index_elements=(UserTagWeight.user_id, UserTagWeight.tag_id),
+                    set_={
+                        "reaction_weight": UserTagWeight.reaction_weight + delta,
+                        "updated_at": func.now(),
+                    },
+                )
+            )
 
     async def _require_user(self, user_id: UUID) -> User:
         user = await self.session.get(User, user_id)
+        if user is None:
+            raise OnboardingError("User not found")
+        return user
+
+    async def _lock_user(self, user_id: UUID) -> User:
+        """Serialize state-changing callbacks for one user until the transaction commits."""
+        user = await self.session.scalar(select(User).where(User.id == user_id).with_for_update())
         if user is None:
             raise OnboardingError("User not found")
         return user
