@@ -2,7 +2,7 @@ from decimal import Decimal
 from uuid import uuid4
 import unittest
 
-from bot.feed import plans_text
+from bot.feed import card_text
 from infrastructure.db.repositories.feed import EventCard, rank_cards, score_card
 
 
@@ -57,8 +57,8 @@ class FeedRecommendationTests(unittest.TestCase):
             frozenset({"concert"}),
         )
 
-    def test_plans_text_contains_event_details(self):
-        result = plans_text([card(score="0", primary="concert")])
+    def test_card_text_contains_event_details(self):
+        result = card_text(card(score="0", primary="concert"))
         self.assertIn("Event", result)
         self.assertIn("https://example.test/event", result)
 

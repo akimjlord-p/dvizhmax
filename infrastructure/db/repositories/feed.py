@@ -8,11 +8,11 @@ from decimal import Decimal
 from typing import Iterable
 from uuid import UUID
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Place, Tag
-from ..social_models import EventPlan, EventReaction, User, UserTagWeight
+from ..social_models import CompanionInterest, EventPlan, EventReaction, Match, User, UserTagWeight
 from .onboarding import OnboardingError
 
 
@@ -40,6 +40,8 @@ class EventCard:
     tag_kinds: tuple[tuple[str, str], ...]
     score: Decimal = Decimal("0")
     plan_id: UUID | None = None
+    company_status: str | None = None
+    is_liked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +79,7 @@ class FeedRepository:
                     select(EventPlan.id).where(
                         EventPlan.user_id == user.id,
                         EventPlan.event_id == EventReaction.event_id,
+                        EventPlan.status == "planned",
                     )
                 ),
             )
@@ -129,6 +132,7 @@ class FeedRepository:
                 cards_by_id[plan.event_id],
                 score=score_card(cards_by_id[plan.event_id], weights),
                 plan_id=plan.id,
+                company_status=plan.company_status,
             )
             for plan in plans
             if plan.event_id in cards_by_id
@@ -152,23 +156,64 @@ class FeedRepository:
         """Create a plan and record implicit positive intent when needed."""
         user = await self._require_user(user_id)
         event = await self.session.get(Event, event_id)
-        if event is None or event.city_id != user.city_id:
-            raise OnboardingError("This event is unavailable")
         reaction = await self.session.get(EventReaction, (user.id, event_id))
+        if event is None or (event.city_id != user.city_id and (reaction is None or reaction.reaction != "like")):
+            raise OnboardingError("This event is unavailable")
+        existing = await self.session.scalar(
+            select(EventPlan).where(EventPlan.user_id == user.id, EventPlan.event_id == event_id)
+        )
+        if existing is not None and existing.status == "planned":
+            return WantToGoResult(plan_id=existing.id, was_created=False)
+        if existing is not None and existing.status == "completed":
+            raise OnboardingError("Этот план уже завершён")
+        previous = LIKE_WEIGHT_DELTA if reaction is not None and reaction.reaction == "like" else Decimal("0")
         if reaction is None:
             self.session.add(EventReaction(user_id=user.id, event_id=event_id, reaction="like"))
         elif reaction.reaction != "like":
             raise OnboardingError("This event is unavailable for plans")
-        existing = await self.session.scalar(
-            select(EventPlan).where(EventPlan.user_id == user.id, EventPlan.event_id == event_id)
-        )
-        if existing is not None:
-            return WantToGoResult(plan_id=existing.id, was_created=False)
-        plan = EventPlan(user_id=user.id, event_id=event_id)
-        self.session.add(plan)
-        await self._change_event_tag_weights(user.id, event_id, WANT_TO_GO_WEIGHT_DELTA)
+        plan = existing or EventPlan(user_id=user.id, event_id=event_id)
+        plan.status = "planned"
+        plan.company_status = "not_looking"
+        if existing is None:
+            self.session.add(plan)
+        await self._change_event_tag_weights(user.id, event_id, WANT_TO_GO_WEIGHT_DELTA - previous)
         await self.session.flush()
         return WantToGoResult(plan_id=plan.id, was_created=True)
+
+    async def remove_like(self, user_id: UUID, event_id: UUID) -> None:
+        reaction = await self.session.get(EventReaction, (user_id, event_id))
+        if reaction is None or reaction.reaction != "like":
+            return
+        plan = await self.session.scalar(select(EventPlan).where(
+            EventPlan.user_id == user_id, EventPlan.event_id == event_id,
+            EventPlan.status.in_(("planned", "completed")),
+        ))
+        # Keep the row as a skip, so removing a like never returns a card to the feed.
+        reaction.reaction = "skip"
+        if plan is None:
+            await self._change_event_tag_weights(user_id, event_id, -LIKE_WEIGHT_DELTA)
+
+    async def cancel_plan(self, user_id: UUID, plan_id: UUID) -> None:
+        plan = await self.session.get(EventPlan, plan_id)
+        if plan is None or plan.user_id != user_id:
+            raise OnboardingError("План недоступен")
+        if plan.status == "cancelled":
+            return
+        if plan.status != "planned":
+            raise OnboardingError("Этот план уже завершён")
+        reaction = await self.session.get(EventReaction, (user_id, plan.event_id))
+        remaining = LIKE_WEIGHT_DELTA if reaction is not None and reaction.reaction == "like" else Decimal("0")
+        plan.status = "cancelled"
+        plan.company_status = "not_looking"
+        await self._change_event_tag_weights(user_id, plan.event_id, remaining - WANT_TO_GO_WEIGHT_DELTA)
+        await self.session.execute(update(CompanionInterest).where(or_(
+            CompanionInterest.sender_plan_id == plan.id,
+            CompanionInterest.recipient_plan_id == plan.id,
+        )).values(status="withdrawn"))
+        await self.session.execute(update(Match).where(
+            Match.event_id == plan.event_id,
+            or_(Match.first_user_id == user_id, Match.second_user_id == user_id),
+        ).values(status="closed"))
 
     async def set_company_search(self, user_id: UUID, plan_id: UUID, *, looking: bool) -> None:
         user = await self._require_user(user_id)
@@ -188,7 +233,7 @@ class FeedRepository:
         feed_only: bool = True,
     ) -> tuple[list[EventCard], dict[str, Decimal], int, list[frozenset[str]]]:
         user = await self._require_user(user_id)
-        conditions = [Event.city_id == user.city_id]
+        conditions = [Event.city_id == user.city_id] if event_ids is None else []
         if feed_only:
             conditions.extend(
                 [
@@ -225,6 +270,10 @@ class FeedRepository:
         images = await self._images_by_event(event_ids_tuple)
         schedules = await self._schedules_by_event(event_ids_tuple)
         weights = await self._weights(user.id)
+        liked_ids = set((await self.session.scalars(select(EventReaction.event_id).where(
+            EventReaction.user_id == user.id, EventReaction.event_id.in_(event_ids_tuple),
+            EventReaction.reaction == "like",
+        ))).all()) if include_reacted else set()
         now = datetime.now(timezone.utc)
         cards: list[EventCard] = []
         for event_id, (event, place, source, city) in events.items():
@@ -253,6 +302,7 @@ class FeedRepository:
                     primary_codes=primary,
                     tag_codes=frozenset(code for code, _ in tagged),
                     tag_kinds=tuple(tagged),
+                    is_liked=event.id in liked_ids,
                 )
             )
         cards = [replace(card, score=score_card(card, weights)) for card in cards]

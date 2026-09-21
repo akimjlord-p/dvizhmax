@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import City, Tag
@@ -66,6 +66,10 @@ class OnboardingRepository:
         if await self.session.get(City, city_id) is None:
             raise OnboardingError("Город больше недоступен")
         user = await self.require_user(user_id)
+        if user.onboarding_step == "edit_city" and user.profile_status == "active":
+            user.city_id = city_id
+            user.onboarding_step = "complete"
+            return
         if user.onboarding_step not in {"consent", "city"} or user.city_id is not None:
             raise OnboardingError("Этот шаг уже неактуален")
         user.city_id = city_id
@@ -77,7 +81,11 @@ class OnboardingRepository:
         user.onboarding_step = "complete"
 
     async def begin_profile(self, user_id: UUID) -> None:
-        user = await self._require_step(user_id, "profile_choice")
+        user = await self.require_user(user_id)
+        if user.profile_status == "draft":
+            return
+        if user.profile_status != "guest" or user.onboarding_step not in {"profile_choice", "complete"}:
+            raise OnboardingError("Этот шаг уже неактуален")
         if user.city_id is None:
             raise OnboardingError("Сначала выбери город")
         user.profile_status = "draft"
@@ -88,7 +96,24 @@ class OnboardingRepository:
         user.age = None
         user.photo_url = None
         user.photo_attachment = None
-        await self.session.execute(delete(UserTagWeight).where(UserTagWeight.user_id == user_id))
+
+    async def begin_edit(self, user_id: UUID, field: str) -> None:
+        user = await self.require_user(user_id)
+        if user.profile_status != "active" or field not in {"name", "gender", "age", "description", "photo", "city", "interests"}:
+            raise OnboardingError("Редактирование недоступно")
+        user.onboarding_step = f"edit_{field}"
+
+    async def finish_edit(self, user_id: UUID) -> None:
+        user = await self.require_user(user_id)
+        if user.profile_status != "active":
+            raise OnboardingError("Сначала заполни анкету")
+        if user.onboarding_step == "edit_interests" and len(await self.selected_interest_ids(user_id)) < 3:
+            raise OnboardingError("Выбери хотя бы 3 интереса")
+        user.onboarding_step = "complete"
+
+    @staticmethod
+    def _advance(user: User, next_step: str) -> None:
+        user.onboarding_step = "complete" if (user.onboarding_step or "").startswith("edit_") else next_step
 
     async def set_name(self, user_id: UUID, value: str) -> None:
         name = value.strip()
@@ -96,21 +121,21 @@ class OnboardingRepository:
             raise OnboardingError("Имя должно быть от 1 до 100 символов")
         user = await self._require_step(user_id, "name")
         user.name = name
-        user.onboarding_step = "gender"
+        self._advance(user, "gender")
 
     async def set_gender(self, user_id: UUID, value: str) -> None:
         if value not in {"male", "female", "other"}:
             raise OnboardingError("Некорректный вариант пола")
         user = await self._require_step(user_id, "gender")
         user.gender = value
-        user.onboarding_step = "age"
+        self._advance(user, "age")
 
     async def set_age(self, user_id: UUID, value: int) -> None:
         if not 14 <= value <= 120:
             raise OnboardingError("Укажи возраст числом от 14 до 120")
         user = await self._require_step(user_id, "age")
         user.age = value
-        user.onboarding_step = "description"
+        self._advance(user, "description")
 
     async def set_description(self, user_id: UUID, value: str | None) -> None:
         description = value.strip() if value else None
@@ -118,7 +143,7 @@ class OnboardingRepository:
             raise OnboardingError("Описание не должно быть длиннее 500 символов")
         user = await self._require_step(user_id, "description")
         user.description = description
-        user.onboarding_step = "photo"
+        self._advance(user, "photo")
 
     async def set_photo(
         self,
@@ -130,13 +155,13 @@ class OnboardingRepository:
         user = await self._require_step(user_id, "photo")
         user.photo_url = photo_url
         user.photo_attachment = photo_attachment
-        user.onboarding_step = "interests"
+        self._advance(user, "interests")
 
     async def skip_photo(self, user_id: UUID) -> None:
         user = await self._require_step(user_id, "photo")
         user.photo_url = None
         user.photo_attachment = None
-        user.onboarding_step = "interests"
+        self._advance(user, "interests")
 
     async def list_interest_tags(self) -> list[Tag]:
         return list(
@@ -160,7 +185,7 @@ class OnboardingRepository:
         )
 
     async def toggle_interest(self, user_id: UUID, tag_id: UUID) -> set[UUID]:
-        await self._require_step(user_id, "interests")
+        user = await self._require_step(user_id, "interests")
         tag = await self.session.get(Tag, tag_id)
         if tag is None or not tag.is_active or not tag.show_in_onboarding:
             raise OnboardingError("Этот интерес больше недоступен")
@@ -174,6 +199,8 @@ class OnboardingRepository:
                 )
             )
         elif weight.initial_weight > 0:
+            if user.profile_status == "active" and len(await self.selected_interest_ids(user_id)) <= 3:
+                raise OnboardingError("Оставь хотя бы 3 интереса. Для замены сначала добавь новый")
             if weight.reaction_weight == 0:
                 await self.session.delete(weight)
             else:
@@ -200,6 +227,8 @@ class OnboardingRepository:
 
     async def _require_step(self, user_id: UUID, expected_step: str) -> User:
         user = await self.require_user(user_id)
-        if user.onboarding_step != expected_step:
+        if user.onboarding_step != expected_step and not (
+            user.profile_status == "active" and user.onboarding_step == f"edit_{expected_step}"
+        ):
             raise OnboardingError("Этот шаг уже неактуален")
         return user

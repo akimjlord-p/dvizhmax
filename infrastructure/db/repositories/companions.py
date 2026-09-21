@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import exists, select
@@ -71,6 +72,10 @@ class CompanionRepository:
         if row is None:
             return None
         candidate_plan, candidate = row
+        self.session.add(CompanionView(
+            viewer_id=user_id, event_id=plan.event_id, shown_user_id=candidate.id,
+        ))
+        await self.session.flush()
         return CompanionCard(
             plan_id=candidate_plan.id,
             user_id=candidate.id,
@@ -95,15 +100,12 @@ class CompanionRepository:
         )
         if owner_plan is None or owner_plan.id == candidate_plan.id:
             raise OnboardingError("Company search is unavailable")
-        if await self.session.get(CompanionView, (user_id, candidate_plan.event_id, candidate_plan.user_id)):
+        view = await self.session.get(CompanionView, (user_id, candidate_plan.event_id, candidate_plan.user_id))
+        if view is None:
+            raise OnboardingError("Сначала открой эту анкету")
+        if view.reacted_at is not None:
             raise OnboardingError("This profile has already been evaluated")
-        self.session.add(
-            CompanionView(
-                viewer_id=user_id,
-                event_id=candidate_plan.event_id,
-                shown_user_id=candidate_plan.user_id,
-            )
-        )
+        view.reacted_at = datetime.now(timezone.utc)
         if not liked:
             return CompanionReactionResult(owner_plan.id, None)
 
