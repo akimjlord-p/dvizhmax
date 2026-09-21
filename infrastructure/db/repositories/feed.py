@@ -498,22 +498,25 @@ def _schedule_timing(schedule: EventSchedule, now: datetime, zone: ZoneInfo) -> 
             return recurring
 
     starts_at, ends_at = schedule.starts_at, schedule.ends_at
+    is_open_ended = schedule.is_endless or (ends_at is not None and ends_at.year >= 2100)
+    if is_open_ended:
+        ends_at = None
     if ends_at is not None and ends_at < now:
         return None
     if starts_at is None:
-        return EventTiming(None, ends_at, "ongoing") if schedule.is_startless and ends_at else None
+        return EventTiming(None, None, "ongoing") if schedule.is_startless and is_open_ended else None
     if starts_at > now:
         state = "period" if ends_at and ends_at.date() > starts_at.date() else "upcoming"
         return EventTiming(starts_at, ends_at, state)
-    if schedule.is_endless or ends_at is not None:
-        return EventTiming(starts_at, None if schedule.is_endless else ends_at, "ongoing")
+    if is_open_ended or ends_at is not None:
+        return EventTiming(starts_at, ends_at, "ongoing")
     return None
 
 
 def _recurring_timing(schedule: EventSchedule, now: datetime, zone: ZoneInfo) -> EventTiming | None:
     local_now = now.astimezone(zone)
     period_start = schedule.starts_at.astimezone(zone).date() if schedule.starts_at else None
-    period_end = None if schedule.is_endless or schedule.ends_at is None else schedule.ends_at.astimezone(zone)
+    period_end = None if schedule.is_endless or schedule.ends_at is None or schedule.ends_at.year >= 2100 else schedule.ends_at.astimezone(zone)
     candidates: list[EventTiming] = []
     for rule in schedule.recurrence or []:
         if not isinstance(rule, dict):

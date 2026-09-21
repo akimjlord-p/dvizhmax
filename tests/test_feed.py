@@ -83,6 +83,19 @@ class FeedRecommendationTests(unittest.IsolatedAsyncioTestCase):
         result = card_text(event)
         self.assertIn("Идёт сейчас", result)
         self.assertNotIn("11.06.2026", result)
+
+    def test_far_future_end_is_treated_as_open_ended(self):
+        schedule = SimpleNamespace(
+            starts_at=None,
+            ends_at=datetime(9998, 12, 31, 21, tzinfo=timezone.utc),
+            is_endless=False,
+            is_startless=True,
+            recurrence=None,
+            start_time=None,
+            end_time=None,
+        )
+        timing = event_timing([schedule], datetime(2026, 9, 22, tzinfo=timezone.utc), "Europe/Moscow")
+        self.assertEqual((timing.state, timing.ends_at), ("ongoing", None))
     def test_cached_max_image_attachment_is_reused(self):
         attachment = _cached_image_attachment({"type": "image", "payload": {"token": "token"}})
         self.assertIsNotNone(attachment)
