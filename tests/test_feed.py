@@ -1,10 +1,14 @@
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 import unittest
 
 from maxapi.types import LinkButton
+from maxapi.types.attachments.attachment import Attachment
 
-from bot.feed import _buttons, _cached_image_attachment, card_text
+import bot.feed as feed_module
+from bot.feed import _buttons, _cached_image_attachment, _event_image_attachment, card_text
 from infrastructure.db.repositories.feed import EventCard, rank_cards, score_card
 
 
@@ -14,6 +18,7 @@ def card(
     primary: str,
     tags: tuple[tuple[str, str], ...] | None = None,
     description: str | None = None,
+    image_url: str | None = None,
 ) -> EventCard:
     tagged = tags or ((primary, "primary"),)
     return EventCard(
@@ -28,7 +33,7 @@ def card(
         data_status="current",
         source_url="https://example.test/event",
         starts_at=None,
-        image_url=None,
+        image_url=image_url,
         image_id=None,
         max_attachment=None,
         primary_codes=frozenset({primary}),
@@ -38,12 +43,33 @@ def card(
     )
 
 
-class FeedRecommendationTests(unittest.TestCase):
+class FeedRecommendationTests(unittest.IsolatedAsyncioTestCase):
     def test_cached_max_image_attachment_is_reused(self):
         attachment = _cached_image_attachment({"type": "image", "payload": {"token": "token"}})
         self.assertIsNotNone(attachment)
         self.assertEqual(attachment.payload.token, "token")
         self.assertIsNone(_cached_image_attachment({"type": "file", "payload": {"token": "token"}}))
+
+    async def test_event_without_image_uses_the_placeholder(self):
+        event = card(score="0", primary="concert")
+        attachment = _cached_image_attachment({"type": "image", "payload": {"token": "placeholder"}})
+        bot = SimpleNamespace(upload_media=AsyncMock(return_value=attachment))
+
+        with patch.object(feed_module, "_placeholder_attachment", None):
+            result = await _event_image_attachment(event, bot=bot)
+
+        self.assertEqual(result, attachment)
+        bot.upload_media.assert_awaited_once()
+
+    async def test_event_image_is_passed_to_max_by_url(self):
+        event = card(score="0", primary="concert", image_url="https://example.test/event.jpg")
+        bot = SimpleNamespace(upload_media=AsyncMock())
+
+        result = await _event_image_attachment(event, bot=bot)
+
+        self.assertIsInstance(result, Attachment)
+        self.assertEqual(result.payload.url, event.image_url)
+        bot.upload_media.assert_not_awaited()
 
     def test_primary_weight_is_more_important_than_secondary(self):
         event = card(

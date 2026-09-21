@@ -10,8 +10,9 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from maxapi import Bot, Dispatcher, F
-from maxapi.enums import UploadType
+from maxapi.enums import AttachmentType, UploadType
 from maxapi.types import AttachmentUpload, ButtonsPayload, CallbackButton, Command, InputMediaBuffer, LinkButton, MessageCallback, MessageCreated
+from maxapi.types.attachments.attachment import Attachment, OtherAttachmentPayload
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.cache.feed_buffer import FeedBufferStore
@@ -24,7 +25,11 @@ MAX_EVENT_IMAGE_BYTES = 5 * 1024 * 1024
 FEED_BUFFER_SIZE = 6
 # Start the next query immediately after the fifth card of a six-card page.
 FEED_REFILL_TRIGGER_REMAINING = 1
+PLACEHOLDER_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "images" / "event-no-image.jpg"
 LOGGER = logging.getLogger(__name__)
+
+_placeholder_attachment: AttachmentUpload | None = None
+_placeholder_attachment_lock = asyncio.Lock()
 
 
 def _payload_parts(payload: str | None) -> tuple[str, str, str] | None:
@@ -124,27 +129,36 @@ def _cached_image_attachment(value: dict | None) -> AttachmentUpload | None:
     return attachment if attachment.type == UploadType.IMAGE else None
 
 
+async def _placeholder_image_attachment(bot: Bot) -> AttachmentUpload:
+    global _placeholder_attachment
+    if _placeholder_attachment is not None:
+        return _placeholder_attachment
+    async with _placeholder_attachment_lock:
+        if _placeholder_attachment is None:
+            _placeholder_attachment = await bot.upload_media(
+                InputMediaBuffer(
+                    buffer=PLACEHOLDER_IMAGE_PATH.read_bytes(),
+                    filename=PLACEHOLDER_IMAGE_PATH.name,
+                    type=UploadType.IMAGE,
+                )
+            )
+    return _placeholder_attachment
+
+
 async def _event_image_attachment(
     card: EventCard,
     *,
     bot: Bot,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> AttachmentUpload | None:
+) -> AttachmentUpload | Attachment:
     cached = _cached_image_attachment(card.max_attachment)
     if cached is not None:
         return cached
-    image = await _image_attachment(card.image_url)
-    if image is None:
-        return None
-    attachment = await bot.upload_media(image)
-    if card.image_id is not None:
-        async with session_factory() as session:
-            await FeedRepository(session).save_image_attachment(
-                card.image_id,
-                attachment.model_dump(mode="json"),
-            )
-            await session.commit()
-    return attachment
+    if card.image_url:
+        return Attachment(
+            type=AttachmentType.IMAGE,
+            payload=OtherAttachmentPayload(url=card.image_url),
+        )
+    return await _placeholder_image_attachment(bot)
 
 
 async def _attachments(
@@ -154,7 +168,6 @@ async def _attachments(
     index: int = 0,
     total: int = 1,
     bot: Bot,
-    session_factory: async_sessionmaker[AsyncSession],
 ) -> list:
     attachments = _buttons(
         card,
@@ -162,7 +175,7 @@ async def _attachments(
         index=index,
         total=total,
     )
-    image = await _event_image_attachment(card, bot=bot, session_factory=session_factory)
+    image = await _event_image_attachment(card, bot=bot)
     if image is not None:
         attachments.insert(0, image)
     return attachments
@@ -251,7 +264,6 @@ def register_feed_handlers(
                 index=index,
                 total=total,
                 bot=bot,
-                session_factory=session_factory,
             ),
         )
 
