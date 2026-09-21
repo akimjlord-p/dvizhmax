@@ -455,8 +455,11 @@ def register_feed_handlers(
             elif action in {"like", "skip"}:
                 async with session_factory() as session:
                     repository = FeedRepository(session)
-                    await repository.record_reaction(user_id, UUID(value), action)
+                    was_recorded = await repository.record_reaction(user_id, UUID(value), action)
                     await session.commit()
+                if not was_recorded:
+                    await event.ack("Эта карточка уже оценена")
+                    return
                 await show_next(edit_current, user_id, event.bot)
             elif action == "want":
                 values = value.split("|")
@@ -507,7 +510,10 @@ def register_feed_handlers(
                         liked=action == "person_like",
                     )
                     await session.commit()
-                if result.match_id is not None:
+                if not result.was_applied:
+                    await event.ack("Эта анкета уже оценена")
+                    return
+                if result.created_match and result.match_id is not None:
                     await send_match_notifications(event.bot, session_factory, result.match_id)
                     await edit_current(
                         "У вас мэтч! Мы отправили вам обоим ссылки на профили MAX.",
