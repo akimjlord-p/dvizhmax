@@ -37,6 +37,7 @@ def _buttons(
     mode: str,
     index: int = 0,
     total: int = 1,
+    show_description: bool = False,
 ) -> list:
     if mode == "liked":
         rows = [
@@ -61,6 +62,14 @@ def _buttons(
             ],
             [CallbackButton(text="Пойду", payload=f"feed:want:{card.id}")],
         ]
+    if card.description and card.description.strip():
+        description_label = "Скрыть описание" if show_description else "Описание"
+        rows.append([
+            CallbackButton(
+                text=description_label,
+                payload=f"feed:description:{card.id}|{mode}|{index}|{int(show_description)}",
+            )
+        ])
     if mode != "feed":
         navigation = []
         if index > 0:
@@ -72,7 +81,7 @@ def _buttons(
     return [ButtonsPayload(buttons=rows + menu_rows()).pack()]
 
 
-def card_text(card: EventCard) -> str:
+def card_text(card: EventCard, *, show_description: bool = False) -> str:
     parts = [card.title]
     if card.starts_at is not None:
         try:
@@ -93,7 +102,7 @@ def card_text(card: EventCard) -> str:
         parts.append("💸 Цена уточняется")
     if card.data_status == "uncertain":
         parts.append("⚠️ Данные могут быть неактуальны — проверь их по ссылке.")
-    if card.description:
+    if show_description and card.description:
         description = card.description.strip()
         parts.append(description[:500] + ("…" if len(description) > 500 else ""))
     parts.append(f"Подробнее: {card.source_url}")
@@ -155,6 +164,7 @@ async def _attachments(
     mode: str,
     index: int = 0,
     total: int = 1,
+    show_description: bool = False,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list:
@@ -163,6 +173,7 @@ async def _attachments(
         mode=mode,
         index=index,
         total=total,
+        show_description=show_description,
     )
     image = await _event_image_attachment(card, bot=bot, session_factory=session_factory)
     if image is not None:
@@ -232,15 +243,39 @@ def register_feed_handlers(
             event_id = await feed_buffer.pop(user_id)
         return None
 
+    async def render_event_card(
+        answer,
+        card: EventCard,
+        *,
+        bot: Bot,
+        mode: str,
+        index: int = 0,
+        total: int = 1,
+        show_description: bool = False,
+        heading: str | None = None,
+    ) -> None:
+        text = card_text(card, show_description=show_description)
+        if heading is not None:
+            text = f"{heading} · {index + 1}/{total}\n\n{text}"
+        await answer(
+            text,
+            attachments=await _attachments(
+                card,
+                mode=mode,
+                index=index,
+                total=total,
+                show_description=show_description,
+                bot=bot,
+                session_factory=session_factory,
+            ),
+        )
+
     async def show_next(answer, user_id: UUID, bot: Bot) -> None:
         card = await next_buffered_card(user_id)
         if card is None:
             await answer("Пока нет новых подходящих мероприятий. Каталог обновляется два раза в день.", attachments=menu())
             return
-        await answer(
-            card_text(card),
-            attachments=await _attachments(card, mode="feed", bot=bot, session_factory=session_factory),
-        )
+        await render_event_card(answer, card, bot=bot, mode="feed")
 
     async def browse(answer, user_id: UUID, bot: Bot, mode: str, index: int = 0) -> None:
         if mode == "feed":
@@ -257,17 +292,60 @@ def register_feed_handlers(
             return
         index = min(max(index, 0), len(cards) - 1)
         card = cards[index]
-        await answer(
-            f"{title} · {index + 1}/{len(cards)}\n\n{card_text(card)}",
-            attachments=await _attachments(
-                card,
-                mode=mode,
-                index=index,
-                total=len(cards),
-                bot=bot,
-                session_factory=session_factory,
-            ),
+        await render_event_card(
+            answer,
+            card,
+            bot=bot,
+            mode=mode,
+            index=index,
+            total=len(cards),
+            heading=title,
         )
+
+    async def toggle_description(
+        answer,
+        user_id: UUID,
+        bot: Bot,
+        *,
+        event_id: UUID,
+        mode: str,
+        index: int,
+        show_description: bool,
+    ) -> None:
+        if mode == "feed":
+            async with session_factory() as session:
+                card = await FeedRepository(session).buffered_card(user_id, event_id)
+            if card is None:
+                raise OnboardingError("Мероприятие больше недоступно")
+            await render_event_card(
+                answer,
+                card,
+                bot=bot,
+                mode=mode,
+                show_description=show_description,
+            )
+            return
+
+        if mode not in {"liked", "plans"}:
+            raise OnboardingError("Неизвестный раздел")
+        async with session_factory() as session:
+            repository = FeedRepository(session)
+            cards = await repository.liked_cards(user_id) if mode == "liked" else await repository.planned_cards(user_id)
+        for current_index, card in enumerate(cards):
+            if card.id == event_id:
+                title = "Понравившиеся" if mode == "liked" else "Мои планы"
+                await render_event_card(
+                    answer,
+                    card,
+                    bot=bot,
+                    mode=mode,
+                    index=current_index,
+                    total=len(cards),
+                    show_description=show_description,
+                    heading=title,
+                )
+                return
+        raise OnboardingError("Мероприятие больше недоступно")
 
     async def show_companion(answer, user_id: UUID, plan_id: UUID) -> None:
         async with session_factory() as session:
@@ -367,6 +445,19 @@ def register_feed_handlers(
             if action == "browse":
                 mode, index = value.split("|")
                 await browse(edit_current, user_id, event.bot, mode, int(index))
+            elif action == "description":
+                event_raw, mode, index, was_shown = value.split("|")
+                if was_shown not in {"0", "1"}:
+                    raise ValueError("Некорректное состояние описания")
+                await toggle_description(
+                    edit_current,
+                    user_id,
+                    event.bot,
+                    event_id=UUID(event_raw),
+                    mode=mode,
+                    index=int(index),
+                    show_description=was_shown == "0",
+                )
             elif action in {"like", "skip"}:
                 async with session_factory() as session:
                     repository = FeedRepository(session)

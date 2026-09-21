@@ -76,9 +76,10 @@ class FeedRecommendationTests(unittest.TestCase):
         self.assertIn("Event", result)
         self.assertIn("https://example.test/event", result)
 
-    def test_card_description_is_shown(self):
+    def test_card_description_is_hidden_until_requested(self):
         event = card(score="0", primary="concert", description="Long <event> description")
-        self.assertIn("Long <event> description", card_text(event))
+        self.assertNotIn("Long <event> description", card_text(event))
+        self.assertIn("Long <event> description", card_text(event, show_description=True))
 
 if __name__ == "__main__":
     unittest.main()
