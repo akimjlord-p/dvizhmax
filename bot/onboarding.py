@@ -15,6 +15,7 @@ from .navigation import menu, menu_rows, profile_offer
 
 CONSENT_VERSION = "2026-09-20"
 MIN_INTERESTS = 3
+MVP_CITY_NAME = "Москва"
 GROUPS = (
     ("music_stage", "Музыка и сцена", frozenset({"concert", "theater", "cinema", "standup", "party", "dance", "festival"})),
     ("learning_creative", "Обучение и творчество", frozenset({"lecture", "masterclass", "exhibition", "conference"})),
@@ -40,8 +41,9 @@ def _group_tags(tags: list[Tag], code: str) -> list[Tag]:
     return [tag for tag in tags if tag.code not in known]
 
 
-def city_keyboard(cities: list[City]) -> list[Any]:
-    return keyboard([[CallbackButton(text=city.name, payload=f"onboarding:city:{city.id}")] for city in cities])
+def mvp_cities(cities: list[City]) -> list[City]:
+    """Only Moscow is available to users during the MVP."""
+    return [city for city in cities if city.name == MVP_CITY_NAME]
 
 
 def categories_keyboard(tags: list[Tag], selected: set[UUID]) -> list[Any]:
@@ -85,18 +87,21 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             await session.commit()
             return user.id
 
-    async def interest_categories(answer, uid: UUID) -> None:
+    async def interest_categories(answer, uid: UUID, *, notice: str | None = None) -> None:
         async with session_factory() as session:
             repo = OnboardingRepository(session)
             tags, selected = await repo.list_interest_tags(), await repo.selected_interest_ids(uid)
-        await answer(
+        text = (
             "Какие занятия тебе интересны?\n\n"
             "Открой раздел и выбери сколько угодно интересов. "
-            f"Сейчас выбрано: {len(selected)}. Для старта нужно хотя бы {MIN_INTERESTS}.",
+            f"Сейчас выбрано: {len(selected)}. Для старта нужно хотя бы {MIN_INTERESTS}."
+        )
+        await answer(
+            f"{notice}\n\n{text}" if notice else text,
             attachments=categories_keyboard(tags, selected),
         )
 
-    async def show_profile(answer, uid: UUID) -> None:
+    async def show_profile(answer, uid: UUID, *, notice: str | None = None) -> None:
         async with session_factory() as session:
             repo = OnboardingRepository(session)
             user = await repo.require_user(uid)
@@ -107,7 +112,8 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             tags = await repo.list_interest_tags()
             selected = await repo.selected_interest_ids(uid)
         if user.profile_status != "active":
-            await answer("Для поиска компании нужна анкета. Хочешь её создать? Твои планы и интересы сохранятся.", attachments=profile_offer())
+            text = "Для поиска компании нужна анкета. Хочешь её создать? Твои планы и интересы сохранятся."
+            await answer(f"{notice}\n\n{text}" if notice else text, attachments=profile_offer())
             return
         fields = (("name", "Имя"), ("gender", "Пол"), ("age", "Возраст"),
                   ("description", "Описание"), ("photo", "Фото"), ("interests", "Интересы"))
@@ -119,9 +125,9 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 f"Интересы: {', '.join(tag.name for tag in tags if tag.id in selected)}\n\nЧто изменить?")
         rows = [[CallbackButton(text=label, payload=f"onboarding:edit:{field}") for field, label in fields[i:i+2]]
                 for i in range(0, len(fields), 2)]
-        await answer(text, attachments=keyboard(rows + menu_rows()))
+        await answer(f"{notice}\n\n{text}" if notice else text, attachments=keyboard(rows + menu_rows()))
 
-    async def resume(event: MessageCreated | BotStarted | MessageCallback, answer) -> None:
+    async def resume(event: MessageCreated | BotStarted | MessageCallback, answer, *, notice: str | None = None) -> None:
         sender = (event.callback.user if isinstance(event, MessageCallback) else
                   event.message.sender if isinstance(event, MessageCreated) else event.user)
         if sender is None:
@@ -131,42 +137,39 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             repo = OnboardingRepository(session)
             user = await repo.require_user(uid)
             consent = await repo.has_consent(uid, consent_version)
-            cities = await repo.list_cities() if consent and (user.city_id is None or user.onboarding_step == "edit_city") else []
+            cities = mvp_cities(await repo.list_cities()) if consent and (user.city_id is None or user.onboarding_step == "edit_city") else []
             step = (user.onboarding_step or "").removeprefix("edit_")
         editing = (user.onboarding_step or "").startswith("edit_")
+
+        def with_notice(text: str) -> str:
+            return f"{notice}\n\n{text}" if notice else text
 
         async def prompt(text: str, rows: list | None = None) -> None:
             rows = list(rows or [])
             if editing:
                 rows.append([CallbackButton(text="Назад", payload="onboarding:edit:back")])
-            await answer(text, attachments=keyboard(rows) if rows else [])
+            await answer(with_notice(text), attachments=keyboard(rows) if rows else [])
 
         if not consent:
             await answer(
-                "ДвижМАКС помогает найти событие и компанию для него.\n\n"
+                with_notice(
+                    "ДвижМАКС помогает найти событие и компанию для него.\n\n"
                 "Мы сохраняем твой MAX ID, город, выбранные интересы и данные анкеты, если ты решишь её создать. "
                 "Это нужно для рекомендаций, поиска компании и общения.\n\n"
-                "Продолжая, ты соглашаешься на обработку этих данных.",
+                    "Продолжая, ты соглашаешься на обработку этих данных."
+                ),
                 attachments=keyboard([[CallbackButton(text="Согласен", payload="onboarding:consent:accept")], [CallbackButton(text="Не согласен", payload="onboarding:consent:decline")]]),
             )
         elif user.city_id is None or step == "city":
-            if len(cities) == 1 and not editing:
-                async with session_factory() as session:
-                    await OnboardingRepository(session).choose_city(uid, cities[0].id)
-                    await session.commit()
-                await answer(
-                    "Пока ДвижМАКС работает только в Москве. Город сохранён.\n\n"
-                    "Хочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша.",
-                    attachments=keyboard([
-                        [CallbackButton(text="Создать профиль", payload="onboarding:profile:create")],
-                        [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")],
-                    ]),
-                )
-            else:
-                await prompt("Выбери город." if cities else "Каталог мероприятий ещё обновляется. Попробуй чуть позже.",
-                             [[CallbackButton(text=city.name, payload=f"onboarding:city:{city.id}")] for city in cities])
+            await prompt(
+                (
+                    "Выбери Москву кнопкой ниже."
+                    if notice else "Сейчас MVP работает только в Москве. Выбери город кнопкой ниже."
+                ) if cities else "Каталог мероприятий ещё обновляется. Попробуй чуть позже.",
+                [[CallbackButton(text=city.name, payload=f"onboarding:city:{city.id}")] for city in cities],
+            )
         elif step == "profile_choice":
-            await answer("Город сохранён.\n\nХочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша.", attachments=keyboard([[CallbackButton(text="Создать профиль", payload="onboarding:profile:create")], [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")]]))
+            await answer(with_notice("Город сохранён.\n\nХочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша."), attachments=keyboard([[CallbackButton(text="Создать профиль", payload="onboarding:profile:create")], [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")]]))
         elif step == "name":
             await prompt("Как тебя зовут? Это имя увидят другие люди.")
         elif step == "gender":
@@ -178,12 +181,12 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
         elif step == "photo":
             await prompt("Прикрепи новое фото для анкеты." if editing else "Добавь фото для анкеты — так тебя будет проще узнать. Его можно пропустить.", [[CallbackButton(text="Удалить фото" if editing else "Пропустить", payload="onboarding:photo:skip")]])
         elif step == "interests":
-            await interest_categories(answer, uid)
+            await interest_categories(answer, uid, notice=notice)
         elif step == "complete":
             if user.profile_status == "active":
-                await show_profile(answer, uid)
+                await show_profile(answer, uid, notice=notice)
             else:
-                await answer("Ты уже в ДвижМАКС. Выбирай мероприятия.", attachments=menu())
+                await answer(with_notice("Ты уже в ДвижМАКС. Выбирай мероприятия."), attachments=menu())
 
     @dispatcher.bot_started()
     async def on_bot_started(event: BotStarted) -> None:
@@ -231,25 +234,15 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 async with session_factory() as session:
                     repo = OnboardingRepository(session)
                     await repo.accept_consent(uid, consent_version)
-                    cities = await repo.list_cities()
-                    if len(cities) == 1:
-                        await repo.choose_city(uid, cities[0].id)
                     await session.commit()
-                if len(cities) == 1:
-                    await event.edit(
-                        "Пока ДвижМАКС работает только в Москве. Город сохранён.\n\n"
-                        "Хочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша.",
-                        attachments=keyboard([
-                            [CallbackButton(text="Создать профиль", payload="onboarding:profile:create")],
-                            [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")],
-                        ]),
-                    )
-                else:
-                    await event.edit("Выбери город." if cities else "Каталог мероприятий ещё обновляется. Попробуй чуть позже.", attachments=city_keyboard(cities) if cities else [])
+                await resume(event, event.edit)
                 return
             if action == "city":
                 async with session_factory() as session:
-                    await OnboardingRepository(session).choose_city(uid, UUID(value))
+                    city = await session.get(City, UUID(value))
+                    if city is None or city.name != MVP_CITY_NAME:
+                        raise OnboardingError("Сейчас MVP работает только в Москве")
+                    await OnboardingRepository(session).choose_city(uid, city.id)
                     await session.commit()
                 await resume(event, event.edit)
                 return
@@ -324,6 +317,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             return
         uid = await user_id(sender.user_id, sender.username)
         text = (event.message.body.text or "").strip()
+        unexpected_step: str | None = None
         async with session_factory() as session:
             repo = OnboardingRepository(session)
             step = ((await repo.require_user(uid)).onboarding_step or "").removeprefix("edit_")
@@ -343,10 +337,15 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                         return
                     await repo.set_photo(uid, photo_url=image[0], photo_attachment=image[1])
                 else:
-                    return
-                await session.commit()
+                    unexpected_step = step
+                if unexpected_step is None:
+                    await session.commit()
             except (OnboardingError, ValueError) as exc:
                 await session.rollback()
                 await event.message.answer(str(exc))
                 return
+        if unexpected_step is not None:
+            notice = "Сейчас MVP работает только в Москве." if unexpected_step == "city" else "Выбери действие кнопкой ниже."
+            await resume(event, event.message.answer, notice=notice)
+            return
         await resume(event, event.message.answer)

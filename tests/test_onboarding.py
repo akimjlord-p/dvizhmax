@@ -1,7 +1,7 @@
 import unittest
 from uuid import uuid4
 
-from bot.onboarding import _callback_parts, categories_keyboard, interests_keyboard
+from bot.onboarding import _callback_parts, categories_keyboard, interests_keyboard, mvp_cities
 
 
 class OnboardingKeyboardTests(unittest.TestCase):
@@ -45,6 +45,11 @@ class OnboardingKeyboardTests(unittest.TestCase):
             tags.append(type("Tag", (), {"id": tag_id, "code": "concert", "name": "Concert"})())
         attachment = interests_keyboard(tags, selected, "music_stage")[0]
         self.assertIn("onboarding:interest:finish", [button.payload for row in attachment.payload.buttons for button in row])
+
+    def test_mvp_cities_only_returns_moscow(self):
+        moscow = type("City", (), {"name": "Москва"})()
+        other = type("City", (), {"name": "Санкт-Петербург"})()
+        self.assertEqual(mvp_cities([other, moscow]), [moscow])
 
 
 if __name__ == "__main__":

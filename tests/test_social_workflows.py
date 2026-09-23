@@ -215,14 +215,13 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(user.photo_attachment)
             self.assertEqual(len(await OnboardingRepository(session).selected_interest_ids(user.id)), 3)
 
-    async def test_edit_name_city_and_interests_preserves_plans_and_learned_weights(self):
+    async def test_edit_name_and_interests_preserves_plans_and_learned_weights(self):
         event = await self.event()
         async with self.factory() as session:
             await FeedRepository(session).want_to_go(self.user.id, event.id)
-            new_city = City(id=uuid4(), name="Казань", timezone="Europe/Moscow")
             tag = Tag(id=uuid4(), code="sport", name="Sport", kind="primary", description="Sport",
                       is_active=True, show_in_onboarding=True)
-            session.add_all([new_city, tag])
+            session.add(tag)
             await session.commit()
         await self.click("onboarding:edit:name")
         event_message = message("New Name", 100)
@@ -230,18 +229,45 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
             await handler(event_message)
             self.assertIn("New Name", answer.call_args.args[0])
-        await self.click("onboarding:edit:city")
-        await self.click(f"onboarding:city:{new_city.id}")
         await self.click("onboarding:edit:interests")
         await self.click(f"onboarding:interest:{tag.id}")
         await self.click(f"onboarding:interest:{self.tags[0].id}")
         await self.click("onboarding:interest:finish")
         async with self.factory() as session:
             user = await session.get(User, self.user.id)
-            self.assertEqual((user.name, user.city_id, user.onboarding_step), ("New Name", new_city.id, "complete"))
+            self.assertEqual((user.name, user.city_id, user.onboarding_step), ("New Name", self.city.id, "complete"))
             weight = await session.get(UserTagWeight, (user.id, self.tags[0].id))
             self.assertEqual((weight.initial_weight, weight.reaction_weight), (Decimal("0"), Decimal("0.5")))
             self.assertEqual([card.id for card in await FeedRepository(session).planned_cards(user.id)], [event.id])
+
+    async def test_text_at_button_step_repeats_current_buttons(self):
+        async with self.factory() as session:
+            user = await session.get(User, self.user.id)
+            user.profile_status = "draft"
+            user.onboarding_step = "gender"
+            await session.commit()
+        event_message = message("любой текст", 100)
+        handler = await select_handler(self.dispatcher, event_message)
+        with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(event_message)
+        self.assertIn("Выбери действие кнопкой ниже", answer.call_args.args[0])
+        self.assertIn("onboarding:gender:male", payloads(answer.call_args.kwargs["attachments"]))
+        async with self.factory() as session:
+            self.assertEqual((await session.get(User, self.user.id)).onboarding_step, "gender")
+
+    async def test_text_at_city_step_only_offers_moscow(self):
+        async with self.factory() as session:
+            guest = await OnboardingRepository(session).get_or_create_user(max_user_id=300, max_username=None)
+            await OnboardingRepository(session).accept_consent(guest.id, CONSENT_VERSION)
+            await session.commit()
+        event_message = message("Санкт-Петербург", 300)
+        handler = await select_handler(self.dispatcher, event_message)
+        with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(event_message)
+        self.assertIn("Сейчас MVP работает только в Москве", answer.call_args.args[0])
+        self.assertIn(f"onboarding:city:{self.city.id}", payloads(answer.call_args.kwargs["attachments"]))
+        async with self.factory() as session:
+            self.assertIsNone((await session.get(User, guest.id)).city_id)
 
     async def test_failed_companion_send_does_not_consume_profile(self):
         event = await self.event()

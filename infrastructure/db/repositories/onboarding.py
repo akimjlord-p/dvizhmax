@@ -99,7 +99,7 @@ class OnboardingRepository:
 
     async def begin_edit(self, user_id: UUID, field: str) -> None:
         user = await self.require_user(user_id)
-        if user.profile_status != "active" or field not in {"name", "gender", "age", "description", "photo", "city", "interests"}:
+        if user.profile_status != "active" or field not in {"name", "gender", "age", "description", "photo", "interests"}:
             raise OnboardingError("Редактирование недоступно")
         user.onboarding_step = f"edit_{field}"
 
