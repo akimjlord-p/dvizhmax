@@ -439,14 +439,7 @@ def register_feed_handlers(
             return
 
         async def edit_current(text=None, *, attachments=None, format=None) -> None:
-            if event.message is None:
-                await event.edit(text, attachments=attachments, format=format)
-                return
-            message = event._require_message()
-            await asyncio.gather(
-                event.ack(),
-                message.edit(text, attachments=attachments, format=format, notify=False),
-            )
+            await event.edit(text, attachments=attachments, format=format, notify=False)
 
         try:
             if action == "browse":

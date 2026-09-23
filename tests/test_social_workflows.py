@@ -288,6 +288,25 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertIsNotNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
 
+    async def test_companion_view_is_saved_when_callback_edits_existing_message(self):
+        event = await self.event()
+        async with self.factory() as session:
+            repo = FeedRepository(session)
+            plan = await repo.want_to_go(self.user.id, event.id)
+            other_plan = await repo.want_to_go(self.other.id, event.id)
+            await repo.set_company_search(self.other.id, other_plan.plan_id, looking=True)
+            await session.commit()
+
+        event_callback = callback(f"feed:company:yes|{plan.plan_id}|plans|0", 100)
+        event_callback.message = message("Previous card", 100).message
+        handler = await select_handler(self.dispatcher, event_callback)
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit:
+            await handler(event_callback)
+        edit.assert_awaited_once()
+
+        async with self.factory() as session:
+            self.assertIsNotNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
+
     async def test_user_cannot_cancel_another_users_plan(self):
         event = await self.event()
         async with self.factory() as session:
