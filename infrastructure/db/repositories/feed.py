@@ -93,11 +93,17 @@ class FeedRepository:
             prior_primary_tags=history,
         )[:limit]
 
-    async def buffered_card(self, user_id: UUID, event_id: UUID) -> EventCard | None:
+    async def buffered_card(
+        self,
+        user_id: UUID,
+        event_id: UUID,
+        *,
+        include_reacted: bool = False,
+    ) -> EventCard | None:
         cards, _, _, _ = await self._candidate_cards(
             user_id,
             event_ids=(event_id,),
-            include_reacted=False,
+            include_reacted=include_reacted,
         )
         return cards[0] if cards else None
 

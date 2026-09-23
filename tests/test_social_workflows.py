@@ -21,7 +21,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from bot.feed import register_feed_handlers
 from bot.onboarding import CONSENT_VERSION, register_onboarding_handlers
 from infrastructure.db.models import City, Event, EventSource, EventTag, Tag
-from infrastructure.db.repositories import CompanionRepository, FeedRepository, OnboardingRepository, OnboardingError
+from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingRepository, OnboardingError
+from infrastructure.db.repositories.demo import DEMO_MAX_USER_ID
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, User, UserTagWeight
 from test_bot_routing import callback, message, select_handler
 
@@ -306,6 +307,54 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.factory() as session:
             self.assertIsNotNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
+
+    async def test_demo_reset_rearms_a_completed_demo_match(self):
+        event = await self.event()
+        async with self.factory() as session:
+            other = await session.get(User, self.other.id)
+            other.max_user_id = DEMO_MAX_USER_ID
+            feed = FeedRepository(session)
+            user_plan = await feed.want_to_go(self.user.id, event.id)
+            demo_plan = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, user_plan.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, demo_plan.plan_id, looking=True)
+            session.add(CompanionView(
+                viewer_id=self.user.id,
+                event_id=event.id,
+                shown_user_id=self.other.id,
+            ))
+            session.add_all([
+                CompanionInterest(
+                    sender_plan_id=user_plan.plan_id,
+                    recipient_plan_id=demo_plan.plan_id,
+                    event_id=event.id,
+                ),
+                CompanionInterest(
+                    sender_plan_id=demo_plan.plan_id,
+                    recipient_plan_id=user_plan.plan_id,
+                    event_id=event.id,
+                ),
+            ])
+            first_user_id, second_user_id = sorted((self.user.id, self.other.id), key=str)
+            session.add(Match(
+                event_id=event.id,
+                first_user_id=first_user_id,
+                second_user_id=second_user_id,
+            ))
+            await session.commit()
+
+        async with self.factory() as session:
+            self.assertEqual(await DemoRepository(session).reset_for_user(self.user.id), event.id)
+            await session.commit()
+
+        async with self.factory() as session:
+            self.assertIsNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
+            interests = list((await session.scalars(select(CompanionInterest).where(
+                CompanionInterest.event_id == event.id,
+            ))).all())
+            self.assertEqual({interest.status for interest in interests}, {"withdrawn"})
+            match = await session.scalar(select(Match).where(Match.event_id == event.id))
+            self.assertEqual(match.status, "closed")
 
     async def test_user_cannot_cancel_another_users_plan(self):
         event = await self.event()

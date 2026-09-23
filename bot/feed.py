@@ -141,6 +141,17 @@ async def _image_attachment(image_url: str | None) -> InputMediaBuffer | None:
         return None
 
 
+def _profile_image_attachment(
+    photo_url: str | None,
+    photo_attachment: dict | None,
+) -> Attachment | None:
+    """Use MAX's saved photo URL directly when rendering a companion profile."""
+    url = photo_url or (photo_attachment or {}).get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    return Attachment(type=AttachmentType.IMAGE, payload=OtherAttachmentPayload(url=url))
+
+
 def _cached_image_attachment(value: dict | None) -> AttachmentUpload | None:
     if not value:
         return None
@@ -355,7 +366,7 @@ def register_feed_handlers(
                 ] + menu_rows()
             ).pack()
         ]
-        image = await _image_attachment(card.photo_url)
+        image = _profile_image_attachment(card.photo_url, card.photo_attachment)
         if image is not None:
             attachments.insert(0, image)
         await answer("\n\n".join(details), attachments=attachments)
@@ -420,8 +431,12 @@ def register_feed_handlers(
             await event.message.answer("Для демо мэтча сначала создай анкету через /profile.")
             return
         async with session_factory() as session:
-            event_id = await DemoRepository(session).event_id()
-            card = await FeedRepository(session).buffered_card(user_id, event_id) if event_id else None
+            event_id = await DemoRepository(session).reset_for_user(user_id)
+            card = (
+                await FeedRepository(session).buffered_card(user_id, event_id, include_reacted=True)
+                if event_id else None
+            )
+            await session.commit()
         if card is None:
             await event.message.answer("Демо ещё не подготовлено. Запусти seed на сервере.", attachments=menu())
             return

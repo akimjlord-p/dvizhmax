@@ -10,7 +10,7 @@ from maxapi.types import LinkButton
 from maxapi.types.attachments.attachment import Attachment
 
 import bot.feed as feed_module
-from bot.feed import _buttons, _cached_image_attachment, _event_image_attachment, card_text
+from bot.feed import _buttons, _cached_image_attachment, _event_image_attachment, _profile_image_attachment, card_text
 from infrastructure.db.repositories.feed import EventCard, event_timing, rank_cards, score_card
 
 
@@ -122,6 +122,14 @@ class FeedRecommendationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, Attachment)
         self.assertEqual(result.payload.url, event.image_url)
         bot.upload_media.assert_not_awaited()
+
+    def test_companion_profile_uses_saved_photo_url(self):
+        attachment = _profile_image_attachment(
+            None,
+            {"photo_id": 1, "token": "photo-token", "url": "https://example.test/profile.jpg"},
+        )
+        self.assertIsInstance(attachment, Attachment)
+        self.assertEqual(attachment.payload.url, "https://example.test/profile.jpg")
 
     def test_primary_weight_is_more_important_than_secondary(self):
         event = card(
