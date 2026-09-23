@@ -6,7 +6,9 @@ from typing import Any
 from uuid import UUID
 
 from maxapi import Dispatcher, F
+from maxapi.enums import AttachmentType
 from maxapi.types import BotStarted, ButtonsPayload, CallbackButton, Command, MessageCallback, MessageCreated
+from maxapi.types.attachments.attachment import Attachment, OtherAttachmentPayload
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.models import City, Tag
@@ -78,6 +80,16 @@ def _photo(event: MessageCreated) -> tuple[str | None, dict[str, Any]] | None:
     return None
 
 
+def _profile_photo_attachment(
+    photo_url: str | None,
+    photo_attachment: dict[str, Any] | None,
+) -> Attachment | None:
+    url = photo_url or (photo_attachment or {}).get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    return Attachment(type=AttachmentType.IMAGE, payload=OtherAttachmentPayload(url=url))
+
+
 def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_sessionmaker[AsyncSession]) -> None:
     consent_version = os.getenv("PRIVACY_POLICY_VERSION", CONSENT_VERSION)
 
@@ -125,7 +137,11 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 f"Интересы: {', '.join(tag.name for tag in tags if tag.id in selected)}\n\nЧто изменить?")
         rows = [[CallbackButton(text=label, payload=f"onboarding:edit:{field}") for field, label in fields[i:i+2]]
                 for i in range(0, len(fields), 2)]
-        await answer(f"{notice}\n\n{text}" if notice else text, attachments=keyboard(rows + menu_rows()))
+        attachments = keyboard(rows + menu_rows())
+        photo = _profile_photo_attachment(user.photo_url, user.photo_attachment)
+        if photo is not None:
+            attachments.insert(0, photo)
+        await answer(f"{notice}\n\n{text}" if notice else text, attachments=attachments)
 
     async def resume(event: MessageCreated | BotStarted | MessageCallback, answer, *, notice: str | None = None) -> None:
         sender = (event.callback.user if isinstance(event, MessageCallback) else

@@ -1,7 +1,7 @@
 import unittest
 from uuid import uuid4
 
-from bot.onboarding import _callback_parts, categories_keyboard, interests_keyboard, mvp_cities
+from bot.onboarding import _callback_parts, _profile_photo_attachment, categories_keyboard, interests_keyboard, mvp_cities
 
 
 class OnboardingKeyboardTests(unittest.TestCase):
@@ -50,6 +50,13 @@ class OnboardingKeyboardTests(unittest.TestCase):
         moscow = type("City", (), {"name": "Москва"})()
         other = type("City", (), {"name": "Санкт-Петербург"})()
         self.assertEqual(mvp_cities([other, moscow]), [moscow])
+
+    def test_profile_photo_attachment_uses_the_saved_url(self):
+        attachment = _profile_photo_attachment(
+            None,
+            {"photo_id": 1, "token": "photo-token", "url": "https://example.test/profile.jpg"},
+        )
+        self.assertEqual(attachment.payload.url, "https://example.test/profile.jpg")
 
 
 if __name__ == "__main__":
