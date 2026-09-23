@@ -9,21 +9,29 @@ from maxapi import Bot
 from maxapi.enums import TextFormat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from infrastructure.db.repositories.demo import DEMO_MAX_USER_ID
 from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients, NotificationRepository
 
 
 LOGGER = logging.getLogger(__name__)
 INTEREST_DIGEST_INTERVAL_SECONDS = 15 * 60
+DEMO_PROFILE_URL = "https://max.ru/t110_hakaton_max_bot"
 
 
 def _escape_markdown(value: str) -> str:
     return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)")
 
 
+def _profile_link(max_user_id: int) -> str:
+    # The demo companion has no real MAX account. Link it to the project bot
+    # so the demo still contains a visible, working MAX link.
+    return DEMO_PROFILE_URL if max_user_id == DEMO_MAX_USER_ID else f"max://user/{max_user_id}"
+
+
 def match_message(*, event_title: str, peer_name: str, peer_max_user_id: int) -> str:
     return (
         f"У вас мэтч на событие «{_escape_markdown(event_title)}»!\n\n"
-        f"Профиль: [{_escape_markdown(peer_name)}](max://user/{peer_max_user_id})"
+        f"Профиль: [{_escape_markdown(peer_name)}]({_profile_link(peer_max_user_id)})"
     )
 
 
