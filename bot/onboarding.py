@@ -1,6 +1,7 @@
 """MAX message handlers for consent and profile onboarding."""
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from uuid import UUID
@@ -15,6 +16,7 @@ from infrastructure.db.models import City, Tag
 from infrastructure.db.repositories import OnboardingError, OnboardingRepository
 from .navigation import menu, menu_rows, profile_offer
 
+LOGGER = logging.getLogger(__name__)
 CONSENT_VERSION = "2026-09-20"
 MIN_INTERESTS = 3
 MVP_CITY_NAME = "Москва"
@@ -333,6 +335,9 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 await event.edit(f"{name}\n\nВыбирай интересы. Отмечено всего: {len(selected)}.", attachments=interests_keyboard(tags, selected, code))
         except (OnboardingError, ValueError) as exc:
             await event.ack(str(exc))
+        except Exception:
+            LOGGER.exception("Onboarding callback %r failed", event.callback.payload)
+            await event.ack("Что-то пошло не так. Попробуй ещё раз")
 
     @dispatcher.message_created(~F.message.body.text.regexp(r"^\s*/"))
     async def on_message(event: MessageCreated) -> None:
@@ -360,6 +365,14 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                         await event.message.answer("Прикрепи изображение или нажми «Пропустить».", attachments=keyboard([[CallbackButton(text="Пропустить", payload="onboarding:photo:skip")]]))
                         return
                     await repo.set_photo(uid, photo_url=image[0], photo_attachment=image[1])
+                elif step == "complete" and await repo.has_consent(uid, consent_version):
+                    # Free text after onboarding is not a command: point to the menu
+                    # instead of reopening the profile.
+                    await event.message.answer(
+                        "Я понимаю только кнопки и команды. Выбери раздел ниже.",
+                        attachments=menu(),
+                    )
+                    return
                 else:
                     unexpected_step = step
                 if unexpected_step is None:

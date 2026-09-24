@@ -28,6 +28,7 @@ class InterestDigest:
     recipient_max_user_id: int
     event_title: str
     interest_ids: tuple[UUID, ...]
+    recipient_plan_id: UUID | None = None
 
 
 class NotificationRepository:
@@ -112,8 +113,9 @@ class NotificationRepository:
                 recipient_max_user_id=max_user_id,
                 event_title=title,
                 interest_ids=tuple(interest_ids),
+                recipient_plan_id=plan_id,
             )
-            for (max_user_id, _plan_id, title), interest_ids in grouped.items()
+            for (max_user_id, plan_id, title), interest_ids in grouped.items()
         ]
 
     async def mark_interests_announced(self, interest_ids: tuple[UUID, ...]) -> None:

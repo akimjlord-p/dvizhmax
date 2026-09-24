@@ -43,6 +43,8 @@ class Fixture:
 
 @unittest.skipUnless(TEST_URL, "Set TEST_DATABASE_URL to an isolated PostgreSQL *_test database")
 class CallbackConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    loop_factory = staticmethod(asyncio.SelectorEventLoop)
+
     @classmethod
     def setUpClass(cls) -> None:
         if not make_url(TEST_URL).database.endswith("_test"):

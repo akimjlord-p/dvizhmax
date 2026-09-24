@@ -7,11 +7,12 @@ from uuid import UUID
 
 from maxapi import Bot
 from maxapi.enums import TextFormat
+from maxapi.types import ButtonsPayload, CallbackButton
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.repositories.demo import DEMO_MAX_USER_IDS
 from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients, NotificationRepository
-from .navigation import menu
+from .navigation import menu, menu_rows
 
 
 LOGGER = logging.getLogger(__name__)
@@ -41,8 +42,15 @@ def interest_digest_message(digest: InterestDigest) -> str:
     noun = "человек хочет" if count == 1 else "человека хотят" if 2 <= count <= 4 else "человек хотят"
     return (
         f"На событие «{digest.event_title}» с тобой {count} {noun} пойти.\n\n"
-        "Открой «Мои планы» и выбери поиск компании."
+        "Нажми «Посмотреть», чтобы увидеть, кто это, и ответить."
     )
+
+
+def interest_digest_attachments(digest: InterestDigest) -> list:
+    rows = menu_rows()
+    if digest.recipient_plan_id is not None:
+        rows = [[CallbackButton(text="Посмотреть", payload=f"feed:likers:{digest.recipient_plan_id}")]] + rows
+    return [ButtonsPayload(buttons=rows).pack()]
 
 
 async def send_match_notifications(
@@ -100,7 +108,11 @@ async def dispatch_interest_digests_once(
 
     for digest in digests:
         try:
-            await bot.send_message(user_id=digest.recipient_max_user_id, text=interest_digest_message(digest))
+            await bot.send_message(
+                user_id=digest.recipient_max_user_id,
+                text=interest_digest_message(digest),
+                attachments=interest_digest_attachments(digest),
+            )
         except Exception:
             LOGGER.exception("Could not send interest digest to MAX user %s", digest.recipient_max_user_id)
             continue

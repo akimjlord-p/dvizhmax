@@ -48,6 +48,7 @@ class EventCard:
     plan_id: UUID | None = None
     company_status: str | None = None
     is_liked: bool = False
+    pending_likes: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,6 +2,7 @@
 import asyncio
 import importlib
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import unittest
@@ -13,6 +14,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from maxapi import Dispatcher
+from maxapi.exceptions.max import MaxApiError
 from maxapi.types import MessageCallback
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
@@ -20,7 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bot.feed import register_feed_handlers
 from bot.onboarding import CONSENT_VERSION, register_onboarding_handlers
-from infrastructure.db.models import City, Event, EventSource, EventTag, Tag
+from infrastructure.db.models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Tag
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, NotificationRepository, OnboardingRepository, OnboardingError
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_MAX_USER_ID
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, User, UserTagWeight
@@ -32,7 +34,7 @@ TEST_URL = os.getenv("TEST_DATABASE_URL")
 
 def payloads(attachments):
     return [button.payload for item in attachments if str(item.type) == "inline_keyboard"
-            for row in item.payload.buttons for button in row]
+            for row in item.payload.buttons for button in row if hasattr(button, "payload")]
 
 
 @unittest.skipUnless(TEST_URL, "Set TEST_DATABASE_URL to an isolated PostgreSQL *_test database")
@@ -70,6 +72,10 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await OnboardingRepository(session).accept_consent(user.id, CONSENT_VERSION)
                 session.add_all([UserTagWeight(user_id=user.id, tag_id=tag.id, initial_weight=Decimal("1"), reaction_weight=Decimal("0")) for tag in self.tags])
             await session.commit()
+        # Test events have no photo; do not upload the placeholder to MAX.
+        placeholder = patch("bot.feed._placeholder_image_attachment", new=AsyncMock(return_value=None))
+        placeholder.start()
+        self.addCleanup(placeholder.stop)
         self.dispatcher = Dispatcher()
         register_onboarding_handlers(self.dispatcher, self.factory)
         register_feed_handlers(self.dispatcher, self.factory)
@@ -84,8 +90,14 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             session.add(event)
             await session.flush()
-            session.add(EventSource(event_id=event.id, source="test", external_id=str(event.id),
-                                    source_url="https://example.test/event", raw_payload={}, is_primary=True))
+            source = EventSource(event_id=event.id, source="test", external_id=str(event.id),
+                                 source_url="https://example.test/event", raw_payload={}, is_primary=True)
+            session.add(source)
+            await session.flush()
+            # Feed and liked lists only show events with an upcoming session.
+            starts_at = datetime.now(timezone.utc) + timedelta(days=3)
+            session.add(EventSchedule(event_source_id=source.id, starts_at=starts_at,
+                                      ends_at=starts_at + timedelta(hours=2), raw_payload={}))
             session.add_all([EventTag(event_id=event.id, tag_id=tag.id, kind=tag.kind) for tag in (self.tags[0], self.tags[2])])
             await session.commit()
         return event
@@ -165,9 +177,9 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await people.next_candidate(self.user.id, a.plan_id))
             view = await session.get(CompanionView, (self.user.id, first.id, self.other.id))
             self.assertIsNone(view.reacted_at)
-            await people.react(self.user.id, b.plan_id, liked=True)
-            with self.assertRaises(OnboardingError):
-                await people.react(self.user.id, b.plan_id, liked=True)
+            self.assertTrue((await people.react(self.user.id, b.plan_id, liked=True)).was_applied)
+            # A repeated callback is acknowledged without changing state.
+            self.assertFalse((await people.react(self.user.id, b.plan_id, liked=True)).was_applied)
             self.assertEqual((await people.next_candidate(self.user.id, pairs[1][0].plan_id)).user_id, self.other.id)
             await people.next_candidate(self.other.id, b.plan_id)
             result = await people.react(self.other.id, a.plan_id, liked=True)
@@ -272,6 +284,45 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertEqual((await session.get(User, self.user.id)).onboarding_step, "gender")
 
+    async def test_rejected_event_photo_falls_back_to_a_card_without_it(self):
+        event = await self.event("Broken photo")
+        async with self.factory() as session:
+            source = await session.scalar(select(EventSource).where(EventSource.event_id == event.id))
+            session.add(EventImage(event_source_id=source.id, url="https://example.test/broken.jpg"))
+            await session.commit()
+        rejected = MaxApiError(code=400, raw={"code": "proto.payload", "message": "Failed to upload image."})
+        callback_event = callback("feed:browse:feed|0", 100)
+        handler = await select_handler(self.dispatcher, callback_event)
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=[rejected, None]) as edit, \
+             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+            await handler(callback_event)
+        self.assertFalse(ack.called)
+        self.assertEqual(edit.await_count, 2)
+        first, retry = (call.kwargs["attachments"] for call in edit.await_args_list)
+        self.assertIn("example.test/broken.jpg", str(first))
+        self.assertNotIn("example.test/broken.jpg", str(retry))
+        self.assertIn("Broken photo", edit.call_args.args[0])
+
+    async def test_unexpected_callback_error_is_acknowledged(self):
+        callback_event = callback("feed:browse:feed|0", 100)
+        handler = await select_handler(self.dispatcher, callback_event)
+        with patch("bot.feed.FeedBufferStore.pop", new=AsyncMock(side_effect=RuntimeError("redis down"))), \
+             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+            await handler(callback_event)
+        ack.assert_awaited_once_with("Что-то пошло не так. Попробуй ещё раз")
+
+    async def test_free_text_after_onboarding_shows_menu_not_profile(self):
+        event_message = message("Хуй", 100)
+        handler = await select_handler(self.dispatcher, event_message)
+        with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(event_message)
+        answer.assert_awaited_once()
+        self.assertNotIn("Твоя анкета", answer.call_args.args[0])
+        self.assertIn("feed:browse:feed|0", payloads(answer.call_args.kwargs["attachments"]))
+        async with self.factory() as session:
+            user = await session.get(User, self.user.id)
+            self.assertEqual((user.onboarding_step, user.name), ("complete", "Alice"))
+
     async def test_text_at_city_step_only_offers_moscow(self):
         async with self.factory() as session:
             guest = await OnboardingRepository(session).get_or_create_user(max_user_id=300, max_username=None)
@@ -296,9 +347,10 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
         event_callback = callback(f"feed:company:yes|{a.plan_id}|plans|0", 100)
         handler = await select_handler(self.dispatcher, event_callback)
-        with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=RuntimeError("MAX unavailable")):
-            with self.assertRaisesRegex(RuntimeError, "MAX unavailable"):
-                await handler(event_callback)
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=RuntimeError("MAX unavailable")), \
+             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+            await handler(event_callback)
+        ack.assert_awaited_once_with("Что-то пошло не так. Попробуй ещё раз")
         async with self.factory() as session:
             self.assertIsNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
         await self.click(f"feed:company:yes|{a.plan_id}|plans|0")
@@ -436,6 +488,62 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.factory() as session:
             self.assertEqual(await NotificationRepository(session).unannounced_interest_digests(), [])
+
+    async def test_person_who_liked_after_a_skip_is_offered_again_as_a_liker(self):
+        event = await self.event("Likers")
+        async with self.factory() as session:
+            feed, people = FeedRepository(session), CompanionRepository(session)
+            alice = await feed.want_to_go(self.user.id, event.id)
+            bob = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, alice.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, bob.plan_id, looking=True)
+            await people.next_candidate(self.user.id, alice.plan_id)
+            await people.react(self.user.id, bob.plan_id, liked=False)
+            await people.next_candidate(self.other.id, bob.plan_id)
+            await people.react(self.other.id, alice.plan_id, liked=True)
+            # One test transaction freezes now(); move Bob's like after Alice's skip.
+            skip = await session.get(CompanionView, (self.user.id, event.id, self.other.id))
+            interest = await session.scalar(select(CompanionInterest).where(CompanionInterest.sender_plan_id == bob.plan_id))
+            interest.updated_at = skip.reacted_at + timedelta(seconds=1)
+            await session.commit()
+
+        async with self.factory() as session:
+            [digest] = await NotificationRepository(session).unannounced_interest_digests()
+            self.assertEqual(digest.recipient_plan_id, alice.plan_id)
+            people = CompanionRepository(session)
+            self.assertIsNone(await people.next_candidate(self.user.id, alice.plan_id))
+            self.assertEqual(await people.pending_liker_counts(self.user.id, [alice.plan_id]), {alice.plan_id: 1})
+            await session.commit()
+
+        edit = await self.click(f"feed:likers:{alice.plan_id}")
+        self.assertIn("хочет пойти с тобой", edit.call_args.args[0])
+        self.assertIn(f"feed:person_like:{bob.plan_id}|likers", payloads(edit.call_args.kwargs["attachments"]))
+
+        with patch("bot.feed.send_match_notifications", new_callable=AsyncMock) as notify:
+            edit = await self.click(f"feed:person_like:{bob.plan_id}|likers")
+        notify.assert_awaited_once()
+        self.assertIn("мэтч", edit.call_args.args[0])
+        self.assertIn(f"feed:likers:{alice.plan_id}", payloads(edit.call_args.kwargs["attachments"]))
+
+        async with self.factory() as session:
+            people = CompanionRepository(session)
+            self.assertEqual(await people.pending_liker_counts(self.user.id, [alice.plan_id]), {})
+            self.assertIsNone(await people.next_liker(self.user.id, alice.plan_id))
+
+    async def test_skip_in_likers_list_hides_that_like(self):
+        event = await self.event("Likers skip")
+        async with self.factory() as session:
+            feed, people = FeedRepository(session), CompanionRepository(session)
+            alice = await feed.want_to_go(self.user.id, event.id)
+            bob = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, alice.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, bob.plan_id, looking=True)
+            await people.next_candidate(self.other.id, bob.plan_id)
+            await people.react(self.other.id, alice.plan_id, liked=True)
+            self.assertEqual((await people.next_liker(self.user.id, alice.plan_id)).user_id, self.other.id)
+            await people.react(self.user.id, bob.plan_id, liked=False)
+            self.assertIsNone(await people.next_liker(self.user.id, alice.plan_id))
+            await session.commit()
 
     async def test_user_cannot_cancel_another_users_plan(self):
         event = await self.event()

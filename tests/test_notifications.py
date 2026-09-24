@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
-from bot.notifications import DEMO_PROFILE_URL, _send_match_messages, interest_digest_message, match_message
+from bot.notifications import DEMO_PROFILE_URL, _send_match_messages, interest_digest_attachments, interest_digest_message, match_message
 from infrastructure.db.repositories.demo import DEMO_MAX_USER_ID
 from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients
 
@@ -24,6 +24,15 @@ class NotificationTextTests(unittest.TestCase):
         digest = InterestDigest(100, "Выставка", (uuid4(), uuid4(), uuid4()))
 
         self.assertIn("3 человека хотят", interest_digest_message(digest))
+
+    def test_interest_digest_opens_the_likers_of_the_plan(self):
+        plan_id = uuid4()
+        digest = InterestDigest(100, "Выставка", (uuid4(),), recipient_plan_id=plan_id)
+
+        [keyboard] = interest_digest_attachments(digest)
+        first_button = keyboard.payload.buttons[0][0]
+        self.assertEqual(first_button.text, "Посмотреть")
+        self.assertEqual(first_button.payload, f"feed:likers:{plan_id}")
 
 
 class MatchNotificationTests(unittest.IsolatedAsyncioTestCase):

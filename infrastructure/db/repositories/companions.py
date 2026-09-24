@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from ..social_models import CompanionInterest, CompanionView, EventPlan, Match, User, UserBlock
+from .demo import DEMO_MAX_USER_IDS
 from .onboarding import OnboardingError
 
 
@@ -69,6 +71,107 @@ class CompanionRepository:
                 photo_url=candidate.photo_url,
                 photo_attachment=candidate.photo_attachment,
             )
+
+    async def next_liker(self, user_id: UUID, plan_id: UUID) -> CompanionCard | None:
+        """Show the newest person who liked this plan and still waits for an answer.
+
+        Unlike ``next_candidate`` this may return someone the user already skipped,
+        provided that their like arrived after that skip.
+        """
+        plan = await self.session.get(EventPlan, plan_id)
+        if plan is None or plan.user_id != user_id or plan.status != "planned":
+            raise OnboardingError("Этот план уже неактуален")
+        if plan.company_status != "looking":
+            raise OnboardingError("Включи поиск компании в «Моих планах», чтобы ответить")
+        row = (
+            await self.session.execute(
+                select(EventPlan, User)
+                .join(CompanionInterest, CompanionInterest.sender_plan_id == EventPlan.id)
+                .join(User, User.id == EventPlan.user_id)
+                .where(*self._pending_liker_conditions(user_id, plan.id))
+                .order_by(CompanionInterest.updated_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None
+        candidate_plan, candidate = row
+        # Re-open the view so the regular react() accepts an answer to this like.
+        await self.session.execute(
+            insert(CompanionView)
+            .values(viewer_id=user_id, event_id=plan.event_id, shown_user_id=candidate.id)
+            .on_conflict_do_update(
+                index_elements=(CompanionView.viewer_id, CompanionView.event_id, CompanionView.shown_user_id),
+                set_={"shown_at": func.now(), "reacted_at": None},
+            )
+        )
+        return CompanionCard(
+            plan_id=candidate_plan.id,
+            user_id=candidate.id,
+            name=candidate.name or "Без имени",
+            gender=candidate.gender,
+            age=candidate.age,
+            description=candidate.description,
+            photo_url=candidate.photo_url,
+            photo_attachment=candidate.photo_attachment,
+        )
+
+    async def pending_liker_counts(self, user_id: UUID, plan_ids: list[UUID]) -> dict[UUID, int]:
+        if not plan_ids:
+            return {}
+        rows = (
+            await self.session.execute(
+                select(CompanionInterest.recipient_plan_id, func.count())
+                .join(EventPlan, EventPlan.id == CompanionInterest.sender_plan_id)
+                .join(User, User.id == EventPlan.user_id)
+                .where(
+                    CompanionInterest.recipient_plan_id.in_(plan_ids),
+                    *self._pending_liker_conditions(user_id, CompanionInterest.recipient_plan_id),
+                )
+                .group_by(CompanionInterest.recipient_plan_id)
+            )
+        ).all()
+        return {plan_id: count for plan_id, count in rows}
+
+    @staticmethod
+    def _pending_liker_conditions(user_id: UUID, recipient_plan_id) -> tuple:
+        """Active likes to the plan from searching real people the user has not answered yet.
+
+        Expects ``EventPlan`` to be the sender plan and ``User`` its owner.
+        """
+        reverse = aliased(CompanionInterest)
+        return (
+            CompanionInterest.recipient_plan_id == recipient_plan_id,
+            CompanionInterest.status == "active",
+            EventPlan.status == "planned",
+            EventPlan.company_status == "looking",
+            EventPlan.user_id != user_id,
+            User.profile_status == "active",
+            User.max_user_id.not_in(DEMO_MAX_USER_IDS),
+            ~exists(
+                select(reverse.id).where(
+                    reverse.sender_plan_id == recipient_plan_id,
+                    reverse.recipient_plan_id == CompanionInterest.sender_plan_id,
+                    reverse.status == "active",
+                )
+            ),
+            ~exists(
+                select(CompanionView.viewer_id).where(
+                    CompanionView.viewer_id == user_id,
+                    CompanionView.event_id == CompanionInterest.event_id,
+                    CompanionView.shown_user_id == EventPlan.user_id,
+                    CompanionView.reacted_at >= CompanionInterest.updated_at,
+                )
+            ),
+            ~exists(
+                select(UserBlock.blocker_id).where(
+                    or_(
+                        (UserBlock.blocker_id == user_id) & (UserBlock.blocked_id == EventPlan.user_id),
+                        (UserBlock.blocker_id == EventPlan.user_id) & (UserBlock.blocked_id == user_id),
+                    )
+                )
+            ),
+        )
 
     async def react(self, user_id: UUID, candidate_plan_id: UUID, *, liked: bool) -> CompanionReactionResult:
         candidate_plan = await self.session.get(EventPlan, candidate_plan_id)

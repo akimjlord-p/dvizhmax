@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from maxapi import Bot, Dispatcher, F
 from maxapi.enums import AttachmentType, UploadType
+from maxapi.exceptions.max import MaxApiError
 from maxapi.types import AttachmentUpload, ButtonsPayload, CallbackButton, Command, InputMediaBuffer, LinkButton, MessageCallback, MessageCreated
 from maxapi.types.attachments.attachment import Attachment, OtherAttachmentPayload
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -59,6 +61,8 @@ def _buttons(
                             payload=f"feed:company:yes|{card.plan_id}|plans|{index}")],
             [CallbackButton(text="Отменить поход", payload=f"feed:cancel:{card.plan_id}|plans|{index}")],
         ]
+        if card.company_status == "looking" and card.pending_likes:
+            rows.insert(1, [CallbackButton(text=f"Тебя лайкнули · {card.pending_likes}", payload=f"feed:likers:{card.plan_id}")])
         if card.company_status == "looking":
             rows.append([CallbackButton(text="Больше не ищу компанию", payload=f"feed:company:no|{card.plan_id}|plans|{index}")])
         if card.is_liked:
@@ -313,16 +317,21 @@ def register_feed_handlers(
         text = card_text(card)
         if heading is not None:
             text = f"{heading} · {index + 1}/{total}\n\n{text}"
-        await answer(
-            text,
-            attachments=await _attachments(
-                card,
-                mode=mode,
-                index=index,
-                total=total,
-                bot=bot,
-            ),
-        )
+        try:
+            await answer(
+                text,
+                attachments=await _attachments(card, mode=mode, index=index, total=total, bot=bot),
+            )
+        except MaxApiError as exc:
+            if card.image_url is None and card.max_attachment is None:
+                raise
+            # MAX sometimes cannot fetch a KudaGo photo by URL. Show the card anyway.
+            LOGGER.warning("MAX rejected the photo of event %s: %s", card.id, exc)
+            fallback = replace(card, image_url=None, max_attachment=None)
+            await answer(
+                text,
+                attachments=await _attachments(fallback, mode=mode, index=index, total=total, bot=bot),
+            )
 
     async def show_next(answer, user_id: UUID, bot: Bot) -> None:
         card = await next_buffered_card(user_id)
@@ -340,6 +349,11 @@ def register_feed_handlers(
         async with session_factory() as session:
             repository = FeedRepository(session)
             cards = await repository.liked_cards(user_id) if mode == "liked" else await repository.planned_cards(user_id)
+            if mode == "plans":
+                counts = await CompanionRepository(session).pending_liker_counts(
+                    user_id, [card.plan_id for card in cards if card.company_status == "looking"],
+                )
+                cards = [replace(card, pending_likes=counts.get(card.plan_id, 0)) for card in cards]
         title = "Понравившиеся" if mode == "liked" else "Мои планы"
         if not cards:
             await answer(f"{title}: пока пусто. Выбирай мероприятия в афише.", attachments=menu())
@@ -369,8 +383,23 @@ def register_feed_handlers(
             # If sending fails, the session rolls back the reserved view.
             await session.commit()
 
-    async def render_companion(answer, card, *, bot: Bot) -> None:
-        details = [card.name]
+    async def show_liker(answer, user_id: UUID, plan_id: UUID, bot: Bot) -> None:
+        async with session_factory() as session:
+            card = await CompanionRepository(session).next_liker(user_id, plan_id)
+            if card is None:
+                await answer(
+                    "Новых лайков на это событие больше нет.",
+                    attachments=[ButtonsPayload(buttons=[
+                        [CallbackButton(text="Смотреть компанию", payload=f"feed:company:yes|{plan_id}|plans|0")],
+                    ] + menu_rows()).pack()],
+                )
+                return
+            await render_companion(answer, card, bot=bot, likers=True)
+            await session.commit()
+
+    async def render_companion(answer, card, *, bot: Bot, likers: bool = False) -> None:
+        details = ["❤️ Этот человек хочет пойти с тобой"] if likers else []
+        details.append(card.name)
         profile_details = []
         if card.gender:
             profile_details.append({"male": "Мужчина", "female": "Женщина"}.get(card.gender, card.gender))
@@ -380,20 +409,26 @@ def register_feed_handlers(
             details.append(", ".join(profile_details))
         if card.description:
             details.append(card.description)
+        suffix = "|likers" if likers else ""
         attachments = [
             ButtonsPayload(
                 buttons=[
                     [
-                        CallbackButton(text="Нравится", payload=f"feed:person_like:{card.plan_id}"),
-                        CallbackButton(text="Дальше", payload=f"feed:person_skip:{card.plan_id}"),
+                        CallbackButton(text="Нравится", payload=f"feed:person_like:{card.plan_id}{suffix}"),
+                        CallbackButton(text="Дальше", payload=f"feed:person_skip:{card.plan_id}{suffix}"),
                     ]
                 ] + menu_rows()
             ).pack()
         ]
         image = await _profile_image_attachment(card.photo_url, card.photo_attachment, bot=bot)
-        if image is not None:
-            attachments.insert(0, image)
-        await answer("\n\n".join(details), attachments=attachments)
+        if image is None:
+            await answer("\n\n".join(details), attachments=attachments)
+            return
+        try:
+            await answer("\n\n".join(details), attachments=[image, *attachments])
+        except MaxApiError as exc:
+            LOGGER.warning("MAX rejected the profile photo of user %s: %s", card.user_id, exc)
+            await answer("\n\n".join(details), attachments=attachments)
 
     async def ask_about_company(answer, plan_id: UUID, mode: str = "feed", index: int = 0) -> None:
         await answer(
@@ -480,20 +515,34 @@ def register_feed_handlers(
         async def edit_current(text=None, *, attachments=None, format=None) -> None:
             await event.edit(text, attachments=attachments, format=format, notify=False)
 
+        callback_answered = False
+
         async def send_next_card(text=None, *, attachments=None, format=None) -> None:
             """Keep every event or profile card in chat and send the next one separately."""
+            nonlocal callback_answered
             if event.message is None:
                 await edit_current(text, attachments=attachments, format=format)
                 return
             original = event._require_message()
-            await asyncio.gather(
+            send = event.send(text, attachments=attachments, format=format, notify=False)
+            if callback_answered:
+                # A retry after a failed send must not answer the same callback twice.
+                await send
+                return
+            answered, sent = await asyncio.gather(
                 event.edit(
                     original.body.text,
                     attachments=original.body.attachments,
                     notify=False,
                 ),
-                event.send(text, attachments=attachments, format=format, notify=False),
+                send,
+                return_exceptions=True,
             )
+            if isinstance(answered, BaseException):
+                raise answered
+            callback_answered = True
+            if isinstance(sent, BaseException):
+                raise sent
 
         try:
             if action == "browse":
@@ -549,11 +598,15 @@ def register_feed_handlers(
                     await show_companion(send_next_card, user_id, UUID(plan_raw), event.bot)
                 else:
                     await browse(send_next_card, user_id, event.bot, mode, index)
+            elif action == "likers":
+                await show_liker(send_next_card, user_id, UUID(value), event.bot)
             elif action in {"person_like", "person_skip"}:
+                candidate_raw, _, source = value.partition("|")
+                from_likers = source == "likers"
                 async with session_factory() as session:
                     result = await CompanionRepository(session).react(
                         user_id,
-                        UUID(value),
+                        UUID(candidate_raw),
                         liked=action == "person_like",
                     )
                     await session.commit()
@@ -562,10 +615,15 @@ def register_feed_handlers(
                     return
                 if result.created_match and result.match_id is not None:
                     await send_match_notifications(event.bot, session_factory, result.match_id)
+                    rows = menu_rows()
+                    if from_likers:
+                        rows = [[CallbackButton(text="Кто ещё лайкнул", payload=f"feed:likers:{result.owner_plan_id}")]] + rows
                     await edit_current(
                         "У вас мэтч! Мы отправили вам обоим ссылки на профили MAX.",
-                        attachments=menu(),
+                        attachments=[ButtonsPayload(buttons=rows).pack()],
                     )
+                elif from_likers:
+                    await show_liker(send_next_card, user_id, result.owner_plan_id, event.bot)
                 else:
                     await show_companion(send_next_card, user_id, result.owner_plan_id, event.bot)
             elif action == "liked":
@@ -573,3 +631,7 @@ def register_feed_handlers(
                 await browse(send_next_card, user_id, event.bot, "liked")
         except (OnboardingError, ValueError) as exc:
             await event.ack(str(exc))
+        except Exception:
+            LOGGER.exception("Feed callback %r failed", event.callback.payload)
+            if not callback_answered:
+                await event.ack("Что-то пошло не так. Попробуй ещё раз")
