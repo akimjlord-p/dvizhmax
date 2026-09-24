@@ -15,7 +15,7 @@ from .navigation import menu
 
 
 LOGGER = logging.getLogger(__name__)
-INTEREST_DIGEST_INTERVAL_SECONDS = 15 * 60
+INTEREST_DIGEST_INTERVAL_SECONDS = 60
 DEMO_PROFILE_URL = "https://max.ru/t110_hakaton_max_bot"
 
 
