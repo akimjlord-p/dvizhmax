@@ -187,6 +187,22 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         result = await self.click(f"onboarding:city:{self.city.id}", max_id=300)
         self.assertIn("onboarding:profile:create", payloads(result.call_args.kwargs["attachments"]))
 
+    async def test_consent_decline_has_a_button_to_start_again(self):
+        declined = await self.click("onboarding:consent:decline", max_id=300)
+        self.assertIn("onboarding:resume:current", payloads(declined.call_args.kwargs["attachments"]))
+
+        resumed = await self.click("onboarding:resume:current", max_id=300)
+        self.assertIn("onboarding:consent:accept", payloads(resumed.call_args.kwargs["attachments"]))
+
+    async def test_text_only_step_keeps_a_resume_button(self):
+        async with self.factory() as session:
+            user = await session.get(User, self.user.id)
+            user.onboarding_step = "name"
+            await session.commit()
+
+        result = await self.click("onboarding:resume:current")
+        self.assertIn("onboarding:resume:current", payloads(result.call_args.kwargs["attachments"]))
+
     async def test_guest_is_offered_profile_and_keeps_existing_recommendation_weights(self):
         event = await self.event()
         async with self.factory() as session:

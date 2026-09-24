@@ -162,6 +162,8 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
 
         async def prompt(text: str, rows: list | None = None) -> None:
             rows = list(rows or [])
+            if not rows:
+                rows.append([CallbackButton(text="Продолжить", payload="onboarding:resume:current")])
             if editing:
                 rows.append([CallbackButton(text="Назад", payload="onboarding:edit:back")])
             await answer(with_notice(text), attachments=keyboard(rows) if rows else [])
@@ -244,7 +246,15 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 await resume(event, event.edit)
                 return
             if action == "consent" and value == "decline":
-                await event.edit("Без согласия бот не может создать профиль и подобрать мероприятия.", attachments=[])
+                await event.edit(
+                    "Без согласия бот не может создать профиль и подобрать мероприятия.",
+                    attachments=keyboard([[
+                        CallbackButton(text="Начать заново", payload="onboarding:resume:current"),
+                    ]]),
+                )
+                return
+            if action == "resume" and value == "current":
+                await resume(event, event.edit)
                 return
             if action == "consent" and value == "accept":
                 async with session_factory() as session:
