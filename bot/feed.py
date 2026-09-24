@@ -87,6 +87,19 @@ def _buttons(
     return [ButtonsPayload(buttons=rows + menu_rows()).pack()]
 
 
+def _without_buttons(attachments: list | None, payloads: set[str]) -> list:
+    """Copy message attachments, dropping inline buttons with the given payloads."""
+    result = []
+    for item in attachments or []:
+        if str(item.type) == "inline_keyboard" and isinstance(item.payload, ButtonsPayload):
+            rows = [[button for button in row if getattr(button, "payload", None) not in payloads]
+                    for row in item.payload.buttons]
+            result.append(ButtonsPayload(buttons=[row for row in rows if row]).pack())
+        else:
+            result.append(item)
+    return result
+
+
 def card_text(card: EventCard) -> str:
     parts = [card.title]
     if card.schedule_state == "ongoing":
@@ -516,6 +529,8 @@ def register_feed_handlers(
             await event.edit(text, attachments=attachments, format=format, notify=False)
 
         callback_answered = False
+        # Set by a reaction: status line and buttons to remove from the rated card.
+        reacted_card: tuple[str, set[str]] | None = None
 
         async def send_next_card(text=None, *, attachments=None, format=None) -> None:
             """Keep every event or profile card in chat and send the next one separately."""
@@ -529,10 +544,15 @@ def register_feed_handlers(
                 # A retry after a failed send must not answer the same callback twice.
                 await send
                 return
+            original_text, original_attachments = original.body.text, original.body.attachments
+            if reacted_card is not None:
+                status, removed = reacted_card
+                original_text = f"{original_text}\n\n{status}" if original_text else status
+                original_attachments = _without_buttons(original_attachments, removed)
             answered, sent = await asyncio.gather(
                 event.edit(
-                    original.body.text,
-                    attachments=original.body.attachments,
+                    original_text,
+                    attachments=original_attachments,
                     notify=False,
                 ),
                 send,
@@ -556,6 +576,10 @@ def register_feed_handlers(
                 if not was_recorded:
                     await event.ack("Эта карточка уже оценена")
                     return
+                removed = {f"feed:like:{value}", f"feed:skip:{value}"}
+                if action == "skip":
+                    removed.add(f"feed:want:{value}")
+                reacted_card = ("✅ Нравится" if action == "like" else "✖️ Не интересно", removed)
                 await show_next(send_next_card, user_id, event.bot)
             elif action == "want":
                 values = value.split("|")

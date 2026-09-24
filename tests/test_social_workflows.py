@@ -303,6 +303,38 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("example.test/broken.jpg", str(retry))
         self.assertIn("Broken photo", edit.call_args.args[0])
 
+    async def test_rated_card_shows_its_reaction_and_loses_reaction_buttons(self):
+        for action, status, kept, removed in (
+            ("like", "✅ Нравится", {"feed:want"}, {"feed:like", "feed:skip"}),
+            ("skip", "✖️ Не интересно", set(), {"feed:like", "feed:skip", "feed:want"}),
+        ):
+            with self.subTest(action=action):
+                event = await self.event(f"Rated {action}")
+                buttons = [[{"type": "callback", "text": "Нравится", "payload": f"feed:like:{event.id}"},
+                            {"type": "callback", "text": "Не интересно", "payload": f"feed:skip:{event.id}"}],
+                           [{"type": "callback", "text": "Пойду", "payload": f"feed:want:{event.id}"}],
+                           [{"type": "link", "text": "Подробнее", "url": "https://example.test/event"}]]
+                callback_event = MessageCallback.model_validate({
+                    "update_type": "message_callback", "timestamp": 0,
+                    "callback": {"timestamp": 0, "callback_id": "c1", "payload": f"feed:{action}:{event.id}",
+                                 "user": {"user_id": 100, "first_name": "A", "is_bot": False, "last_activity_time": 0}},
+                    "message": {"recipient": {"chat_id": 100, "chat_type": "dialog"}, "timestamp": 0,
+                                "body": {"mid": "m1", "seq": 1, "text": f"Rated {action}",
+                                         "attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}},
+                })
+                handler = await select_handler(self.dispatcher, callback_event)
+                with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
+                     patch.object(MessageCallback, "send", new_callable=AsyncMock) as send, \
+                     patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+                    await handler(callback_event)
+                self.assertFalse(ack.called)
+                send.assert_awaited_once()
+                self.assertEqual(edit.call_args.args[0], f"Rated {action}\n\n{status}")
+                left = {payload.rsplit(":", 1)[0] for payload in payloads(edit.call_args.kwargs["attachments"])}
+                self.assertTrue(kept <= left)
+                self.assertFalse(removed & left)
+                self.assertIn("Подробнее", str(edit.call_args.kwargs["attachments"]))
+
     async def test_unexpected_callback_error_is_acknowledged(self):
         callback_event = callback("feed:browse:feed|0", 100)
         handler = await select_handler(self.dispatcher, callback_event)
