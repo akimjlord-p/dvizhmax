@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.repositories.demo import DEMO_MAX_USER_IDS
 from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients, NotificationRepository
+from .navigation import menu
 
 
 LOGGER = logging.getLogger(__name__)
@@ -77,7 +78,12 @@ async def _send_match_messages(bot: Bot, recipients: MatchRecipients) -> None:
             ),
         ))
     results = await asyncio.gather(*(
-        bot.send_message(user_id=user_id, text=text, format=TextFormat.MARKDOWN)
+        bot.send_message(
+            user_id=user_id,
+            text=text,
+            format=TextFormat.MARKDOWN,
+            attachments=menu(),
+        )
         for user_id, text in messages
     ), return_exceptions=True)
     for (recipient_max_user_id, _), result in zip(messages, results, strict=True):

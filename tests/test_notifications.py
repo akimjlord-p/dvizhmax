@@ -1,9 +1,11 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
-from bot.notifications import DEMO_PROFILE_URL, interest_digest_message, match_message
+from bot.notifications import DEMO_PROFILE_URL, _send_match_messages, interest_digest_message, match_message
 from infrastructure.db.repositories.demo import DEMO_MAX_USER_ID
-from infrastructure.db.repositories.notifications import InterestDigest
+from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients
 
 
 class NotificationTextTests(unittest.TestCase):
@@ -22,3 +24,22 @@ class NotificationTextTests(unittest.TestCase):
         digest = InterestDigest(100, "Выставка", (uuid4(), uuid4(), uuid4()))
 
         self.assertIn("3 человека хотят", interest_digest_message(digest))
+
+
+class MatchNotificationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_match_message_has_the_navigation_menu(self):
+        bot = SimpleNamespace(send_message=AsyncMock())
+        await _send_match_messages(bot, MatchRecipients(
+            event_title="Концерт",
+            first_max_user_id=100,
+            first_name="Аня",
+            second_max_user_id=200,
+            second_name="Борис",
+        ))
+
+        self.assertEqual(bot.send_message.await_count, 2)
+        for call in bot.send_message.await_args_list:
+            buttons = call.kwargs["attachments"][0].payload.buttons
+            payloads = [button.payload for row in buttons for button in row]
+            self.assertIn("feed:browse:feed|0", payloads)
+            self.assertIn("feed:browse:plans|0", payloads)
