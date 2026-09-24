@@ -26,10 +26,13 @@ FEED_BUFFER_SIZE = 6
 # Start the next query immediately after the fifth card of a six-card page.
 FEED_REFILL_TRIGGER_REMAINING = 1
 PLACEHOLDER_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "images" / "event-no-image.jpg"
+DEMO_PROFILE_ASSETS_DIR = PLACEHOLDER_IMAGE_PATH.parent
 LOGGER = logging.getLogger(__name__)
 
 _placeholder_attachment: AttachmentUpload | None = None
 _placeholder_attachment_lock = asyncio.Lock()
+_demo_profile_attachments: dict[str, AttachmentUpload] = {}
+_demo_profile_attachments_lock = asyncio.Lock()
 
 
 def _payload_parts(payload: str | None) -> tuple[str, str, str] | None:
@@ -141,11 +144,31 @@ async def _image_attachment(image_url: str | None) -> InputMediaBuffer | None:
         return None
 
 
-def _profile_image_attachment(
+async def _profile_image_attachment(
     photo_url: str | None,
     photo_attachment: dict | None,
-) -> Attachment | None:
-    """Use MAX's saved photo URL directly when rendering a companion profile."""
+    *,
+    bot: Bot,
+) -> Attachment | AttachmentUpload | None:
+    """Render user photos by URL and fixed demo placeholders from local assets."""
+    if photo_url and photo_url.startswith("asset://"):
+        asset_name = photo_url.removeprefix("asset://")
+        asset_path = DEMO_PROFILE_ASSETS_DIR / asset_name
+        if asset_path.name != asset_name or not asset_path.is_file():
+            return None
+        cached = _demo_profile_attachments.get(asset_name)
+        if cached is not None:
+            return cached
+        async with _demo_profile_attachments_lock:
+            cached = _demo_profile_attachments.get(asset_name)
+            if cached is None:
+                cached = await bot.upload_media(InputMediaBuffer(
+                    buffer=asset_path.read_bytes(),
+                    filename=asset_name,
+                    type=UploadType.IMAGE,
+                ))
+                _demo_profile_attachments[asset_name] = cached
+        return cached
     url = photo_url or (photo_attachment or {}).get("url")
     if not isinstance(url, str) or not url:
         return None
@@ -332,7 +355,7 @@ def register_feed_handlers(
             heading=title,
         )
 
-    async def show_companion(answer, user_id: UUID, plan_id: UUID) -> None:
+    async def show_companion(answer, user_id: UUID, plan_id: UUID, bot: Bot) -> None:
         async with session_factory() as session:
             card = await CompanionRepository(session).next_candidate(user_id, plan_id)
             if card is None:
@@ -341,11 +364,11 @@ def register_feed_handlers(
                     attachments=menu(),
                 )
                 return
-            await render_companion(answer, card)
+            await render_companion(answer, card, bot=bot)
             # If sending fails, the session rolls back the reserved view.
             await session.commit()
 
-    async def render_companion(answer, card) -> None:
+    async def render_companion(answer, card, *, bot: Bot) -> None:
         details = [card.name]
         profile_details = []
         if card.gender:
@@ -366,7 +389,7 @@ def register_feed_handlers(
                 ] + menu_rows()
             ).pack()
         ]
-        image = _profile_image_attachment(card.photo_url, card.photo_attachment)
+        image = await _profile_image_attachment(card.photo_url, card.photo_attachment, bot=bot)
         if image is not None:
             attachments.insert(0, image)
         await answer("\n\n".join(details), attachments=attachments)
@@ -456,10 +479,25 @@ def register_feed_handlers(
         async def edit_current(text=None, *, attachments=None, format=None) -> None:
             await event.edit(text, attachments=attachments, format=format, notify=False)
 
+        async def send_event_card(text=None, *, attachments=None, format=None) -> None:
+            """Keep every event card in chat and send the next one separately."""
+            if event.message is None:
+                await edit_current(text, attachments=attachments, format=format)
+                return
+            original = event._require_message()
+            await asyncio.gather(
+                event.edit(
+                    original.body.text,
+                    attachments=original.body.attachments,
+                    notify=False,
+                ),
+                event.send(text, attachments=attachments, format=format, notify=False),
+            )
+
         try:
             if action == "browse":
                 mode, index = value.split("|")
-                await browse(edit_current, user_id, event.bot, mode, int(index))
+                await browse(send_event_card, user_id, event.bot, mode, int(index))
             elif action in {"like", "skip"}:
                 async with session_factory() as session:
                     repository = FeedRepository(session)
@@ -468,7 +506,7 @@ def register_feed_handlers(
                 if not was_recorded:
                     await event.ack("Эта карточка уже оценена")
                     return
-                await show_next(edit_current, user_id, event.bot)
+                await show_next(send_event_card, user_id, event.bot)
             elif action == "want":
                 values = value.split("|")
                 event_id = UUID(values[0])
@@ -486,7 +524,7 @@ def register_feed_handlers(
                     else:
                         await repository.cancel_plan(user_id, UUID(target))
                     await session.commit()
-                await browse(edit_current, user_id, event.bot, mode, int(index))
+                await browse(send_event_card, user_id, event.bot, mode, int(index))
             elif action == "plan_company":
                 await ask_about_company(edit_current, UUID(value))
             elif action == "company":
@@ -507,9 +545,9 @@ def register_feed_handlers(
                         await DemoRepository(session).arm_reverse_interest(user_id=user_id, user_plan_id=UUID(plan_raw))
                     await session.commit()
                 if choice == "yes":
-                    await show_companion(edit_current, user_id, UUID(plan_raw))
+                    await show_companion(edit_current, user_id, UUID(plan_raw), event.bot)
                 else:
-                    await browse(edit_current, user_id, event.bot, mode, index)
+                    await browse(send_event_card, user_id, event.bot, mode, index)
             elif action in {"person_like", "person_skip"}:
                 async with session_factory() as session:
                     result = await CompanionRepository(session).react(
@@ -528,9 +566,9 @@ def register_feed_handlers(
                         attachments=menu(),
                     )
                 else:
-                    await show_companion(edit_current, user_id, result.owner_plan_id)
+                    await show_companion(edit_current, user_id, result.owner_plan_id, event.bot)
             elif action == "liked":
                 # Old messages remain navigable after deploying the card browser.
-                await browse(edit_current, user_id, event.bot, "liked")
+                await browse(send_event_card, user_id, event.bot, "liked")
         except (OnboardingError, ValueError) as exc:
             await event.ack(str(exc))

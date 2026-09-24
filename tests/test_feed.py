@@ -123,13 +123,26 @@ class FeedRecommendationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.payload.url, event.image_url)
         bot.upload_media.assert_not_awaited()
 
-    def test_companion_profile_uses_saved_photo_url(self):
-        attachment = _profile_image_attachment(
+    async def test_companion_profile_uses_saved_photo_url(self):
+        attachment = await _profile_image_attachment(
             None,
             {"photo_id": 1, "token": "photo-token", "url": "https://example.test/profile.jpg"},
+            bot=SimpleNamespace(upload_media=AsyncMock()),
         )
         self.assertIsInstance(attachment, Attachment)
         self.assertEqual(attachment.payload.url, "https://example.test/profile.jpg")
+
+    async def test_demo_companion_profile_uses_local_placeholder_asset(self):
+        uploaded = _cached_image_attachment({"type": "image", "payload": {"token": "demo"}})
+        bot = SimpleNamespace(upload_media=AsyncMock(return_value=uploaded))
+        with patch.object(feed_module, "_demo_profile_attachments", {}):
+            attachment = await _profile_image_attachment(
+                "asset://demo-profile-katya.png",
+                None,
+                bot=bot,
+            )
+        self.assertEqual(attachment, uploaded)
+        bot.upload_media.assert_awaited_once()
 
     def test_primary_weight_is_more_important_than_secondary(self):
         event = card(

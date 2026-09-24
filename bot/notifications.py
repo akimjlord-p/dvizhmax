@@ -9,7 +9,7 @@ from maxapi import Bot
 from maxapi.enums import TextFormat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from infrastructure.db.repositories.demo import DEMO_MAX_USER_ID
+from infrastructure.db.repositories.demo import DEMO_MAX_USER_IDS
 from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients, NotificationRepository
 
 
@@ -25,7 +25,7 @@ def _escape_markdown(value: str) -> str:
 def _profile_link(max_user_id: int) -> str:
     # The demo companion has no real MAX account. Link it to the project bot
     # so the demo still contains a visible, working MAX link.
-    return DEMO_PROFILE_URL if max_user_id == DEMO_MAX_USER_ID else f"max://user/{max_user_id}"
+    return DEMO_PROFILE_URL if max_user_id in DEMO_MAX_USER_IDS else f"max://user/{max_user_id}"
 
 
 def match_message(*, event_title: str, peer_name: str, peer_max_user_id: int) -> str:
@@ -57,30 +57,30 @@ async def send_match_notifications(
 
 
 async def _send_match_messages(bot: Bot, recipients: MatchRecipients) -> None:
-    sends = (
-        bot.send_message(
-            user_id=recipients.first_max_user_id,
-            text=match_message(
+    messages = []
+    if recipients.first_max_user_id not in DEMO_MAX_USER_IDS:
+        messages.append((
+            recipients.first_max_user_id,
+            match_message(
                 event_title=recipients.event_title,
                 peer_name=recipients.second_name,
                 peer_max_user_id=recipients.second_max_user_id,
             ),
-            format=TextFormat.MARKDOWN,
-        ),
-        bot.send_message(
-            user_id=recipients.second_max_user_id,
-            text=match_message(
+        ))
+    if recipients.second_max_user_id not in DEMO_MAX_USER_IDS:
+        messages.append((
+            recipients.second_max_user_id,
+            match_message(
                 event_title=recipients.event_title,
                 peer_name=recipients.first_name,
                 peer_max_user_id=recipients.first_max_user_id,
             ),
-            format=TextFormat.MARKDOWN,
-        ),
-    )
-    results = await asyncio.gather(*sends, return_exceptions=True)
-    for recipient_max_user_id, result in zip(
-        (recipients.first_max_user_id, recipients.second_max_user_id), results, strict=True,
-    ):
+        ))
+    results = await asyncio.gather(*(
+        bot.send_message(user_id=user_id, text=text, format=TextFormat.MARKDOWN)
+        for user_id, text in messages
+    ), return_exceptions=True)
+    for (recipient_max_user_id, _), result in zip(messages, results, strict=True):
         if isinstance(result, Exception):
             LOGGER.warning("Could not send match notification to MAX user %s: %s", recipient_max_user_id, result)
 

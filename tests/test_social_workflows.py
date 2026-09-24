@@ -22,7 +22,7 @@ from bot.feed import register_feed_handlers
 from bot.onboarding import CONSENT_VERSION, register_onboarding_handlers
 from infrastructure.db.models import City, Event, EventSource, EventTag, Tag
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingRepository, OnboardingError
-from infrastructure.db.repositories.demo import DEMO_MAX_USER_ID
+from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_MAX_USER_ID
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, User, UserTagWeight
 from test_bot_routing import callback, message, select_handler
 
@@ -79,8 +79,8 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.connection.close()
         await self.engine.dispose()
 
-    async def event(self, title="Event"):
-        event = Event(id=uuid4(), title=title, city_id=self.city.id, tagging_status="done")
+    async def event(self, title="Event", event_id=None):
+        event = Event(id=event_id or uuid4(), title=title, city_id=self.city.id, tagging_status="done")
         async with self.factory() as session:
             session.add(event)
             await session.flush()
@@ -308,8 +308,24 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertIsNotNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
 
-    async def test_demo_reset_rearms_a_completed_demo_match(self):
+    async def test_event_navigation_sends_a_new_message_without_replacing_the_old_card(self):
         event = await self.event()
+        async with self.factory() as session:
+            await FeedRepository(session).record_reaction(self.user.id, event.id, "like")
+            await session.commit()
+
+        event_callback = callback("feed:browse:liked|0", 100)
+        event_callback.message = message("Previous card", 100).message
+        handler = await select_handler(self.dispatcher, event_callback)
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
+             patch.object(MessageCallback, "send", new_callable=AsyncMock) as send:
+            await handler(event_callback)
+
+        edit.assert_awaited_once()
+        self.assertIn(event.title, send.call_args.args[0])
+
+    async def test_demo_reset_rearms_a_completed_demo_match(self):
+        event = await self.event(event_id=DEMO_EVENT_ID)
         async with self.factory() as session:
             other = await session.get(User, self.other.id)
             other.max_user_id = DEMO_MAX_USER_ID
