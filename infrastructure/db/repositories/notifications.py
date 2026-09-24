@@ -9,6 +9,7 @@ from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from .demo import DEMO_MAX_USER_IDS
 from ..models import Event
 from ..social_models import CompanionInterest, EventPlan, Match, User
 
@@ -68,6 +69,7 @@ class NotificationRepository:
         recipient_plan = aliased(EventPlan)
         sender_plan = aliased(EventPlan)
         recipient = aliased(User)
+        sender = aliased(User)
         reverse_interest = aliased(CompanionInterest)
         rows = (
             await self.session.execute(
@@ -80,6 +82,7 @@ class NotificationRepository:
                 .join(recipient_plan, recipient_plan.id == CompanionInterest.recipient_plan_id)
                 .join(sender_plan, sender_plan.id == CompanionInterest.sender_plan_id)
                 .join(recipient, recipient.id == recipient_plan.user_id)
+                .join(sender, sender.id == sender_plan.user_id)
                 .join(Event, Event.id == CompanionInterest.event_id)
                 .where(
                     CompanionInterest.status == "active",
@@ -89,6 +92,7 @@ class NotificationRepository:
                     recipient_plan.company_status == "looking",
                     sender_plan.status == "planned",
                     sender_plan.company_status == "looking",
+                    sender.max_user_id.not_in(DEMO_MAX_USER_IDS),
                     ~exists(
                         select(reverse_interest.id).where(
                             reverse_interest.sender_plan_id == recipient_plan.id,
