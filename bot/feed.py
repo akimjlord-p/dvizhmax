@@ -479,8 +479,8 @@ def register_feed_handlers(
         async def edit_current(text=None, *, attachments=None, format=None) -> None:
             await event.edit(text, attachments=attachments, format=format, notify=False)
 
-        async def send_event_card(text=None, *, attachments=None, format=None) -> None:
-            """Keep every event card in chat and send the next one separately."""
+        async def send_next_card(text=None, *, attachments=None, format=None) -> None:
+            """Keep every event or profile card in chat and send the next one separately."""
             if event.message is None:
                 await edit_current(text, attachments=attachments, format=format)
                 return
@@ -497,7 +497,7 @@ def register_feed_handlers(
         try:
             if action == "browse":
                 mode, index = value.split("|")
-                await browse(send_event_card, user_id, event.bot, mode, int(index))
+                await browse(send_next_card, user_id, event.bot, mode, int(index))
             elif action in {"like", "skip"}:
                 async with session_factory() as session:
                     repository = FeedRepository(session)
@@ -506,7 +506,7 @@ def register_feed_handlers(
                 if not was_recorded:
                     await event.ack("Эта карточка уже оценена")
                     return
-                await show_next(send_event_card, user_id, event.bot)
+                await show_next(send_next_card, user_id, event.bot)
             elif action == "want":
                 values = value.split("|")
                 event_id = UUID(values[0])
@@ -524,7 +524,7 @@ def register_feed_handlers(
                     else:
                         await repository.cancel_plan(user_id, UUID(target))
                     await session.commit()
-                await browse(send_event_card, user_id, event.bot, mode, int(index))
+                await browse(send_next_card, user_id, event.bot, mode, int(index))
             elif action == "plan_company":
                 await ask_about_company(edit_current, UUID(value))
             elif action == "company":
@@ -542,12 +542,12 @@ def register_feed_handlers(
                     repository = FeedRepository(session)
                     await repository.set_company_search(user_id, UUID(plan_raw), looking=choice == "yes")
                     if choice == "yes":
-                        await DemoRepository(session).arm_reverse_interest(user_id=user_id, user_plan_id=UUID(plan_raw))
+                        await DemoRepository(session).ensure_candidates_for_plan(user_id=user_id, user_plan_id=UUID(plan_raw))
                     await session.commit()
                 if choice == "yes":
-                    await show_companion(edit_current, user_id, UUID(plan_raw), event.bot)
+                    await show_companion(send_next_card, user_id, UUID(plan_raw), event.bot)
                 else:
-                    await browse(send_event_card, user_id, event.bot, mode, index)
+                    await browse(send_next_card, user_id, event.bot, mode, index)
             elif action in {"person_like", "person_skip"}:
                 async with session_factory() as session:
                     result = await CompanionRepository(session).react(
@@ -566,9 +566,9 @@ def register_feed_handlers(
                         attachments=menu(),
                     )
                 else:
-                    await show_companion(edit_current, user_id, result.owner_plan_id, event.bot)
+                    await show_companion(send_next_card, user_id, result.owner_plan_id, event.bot)
             elif action == "liked":
                 # Old messages remain navigable after deploying the card browser.
-                await browse(send_event_card, user_id, event.bot, "liked")
+                await browse(send_next_card, user_id, event.bot, "liked")
         except (OnboardingError, ValueError) as exc:
             await event.ack(str(exc))

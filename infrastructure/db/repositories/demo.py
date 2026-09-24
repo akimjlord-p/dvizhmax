@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import delete, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..social_models import CompanionInterest, CompanionView, EventPlan, Match, User
@@ -125,34 +126,63 @@ class DemoRepository:
             )
         return event_id
 
-    async def arm_reverse_interest(self, *, user_id: UUID, user_plan_id: UUID) -> bool:
-        """Make every fixed demo candidate reciprocate interest in the demo event."""
+    async def ensure_candidates_for_plan(self, *, user_id: UUID, user_plan_id: UUID) -> bool:
+        """Attach the fixed test profiles to a selected event on demand."""
         user_plan = await self.session.get(EventPlan, user_plan_id)
         if (
             user_plan is None
             or user_plan.user_id != user_id
-            or user_plan.event_id != DEMO_EVENT_ID
+            or user_plan.status != "planned"
             or user_plan.company_status != "looking"
         ):
             return False
-        demo_plans = await self._active_demo_plans()
-        if not demo_plans:
+        demo_users = list((await self.session.scalars(
+            select(User).where(User.max_user_id.in_(DEMO_MAX_USER_IDS))
+        )).all())
+        if not demo_users:
             return False
-        for demo_plan in demo_plans:
-            interest = await self.session.scalar(select(CompanionInterest).where(
-                CompanionInterest.sender_plan_id == demo_plan.id,
-                CompanionInterest.recipient_plan_id == user_plan.id,
-            ))
-            if interest is None:
-                self.session.add(CompanionInterest(
-                    sender_plan_id=demo_plan.id,
+
+        for demo_user in demo_users:
+            # Several users can open company search for one event together.
+            # The unique plan constraint makes this upsert safe across callbacks.
+            demo_plan_id = await self.session.scalar(
+                insert(EventPlan)
+                .values(
+                    id=uuid4(),
+                    user_id=demo_user.id,
+                    event_id=user_plan.event_id,
+                    status="planned",
+                    company_status="looking",
+                )
+                .on_conflict_do_update(
+                    index_elements=(EventPlan.user_id, EventPlan.event_id),
+                    set_={
+                        "status": "planned",
+                        "company_status": "looking",
+                    },
+                )
+                .returning(EventPlan.id)
+            )
+            await self.session.execute(
+                insert(CompanionInterest)
+                .values(
+                    id=uuid4(),
+                    sender_plan_id=demo_plan_id,
                     recipient_plan_id=user_plan.id,
-                    event_id=DEMO_EVENT_ID,
-                ))
-            else:
-                interest.status = "active"
-                interest.viewed_at = None
-                interest.announced_at = None
+                    event_id=user_plan.event_id,
+                )
+                .on_conflict_do_update(
+                    index_elements=(
+                        CompanionInterest.sender_plan_id,
+                        CompanionInterest.recipient_plan_id,
+                    ),
+                    set_={
+                        "status": "active",
+                        "viewed_at": None,
+                        "announced_at": None,
+                    },
+                )
+            )
         return True
 
     async def _active_demo_plans(self) -> list[EventPlan]:

@@ -289,7 +289,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertIsNotNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
 
-    async def test_companion_view_is_saved_when_callback_edits_existing_message(self):
+    async def test_companion_view_is_saved_when_callback_sends_a_new_message(self):
         event = await self.event()
         async with self.factory() as session:
             repo = FeedRepository(session)
@@ -301,9 +301,11 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         event_callback = callback(f"feed:company:yes|{plan.plan_id}|plans|0", 100)
         event_callback.message = message("Previous card", 100).message
         handler = await select_handler(self.dispatcher, event_callback)
-        with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit:
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
+             patch.object(MessageCallback, "send", new_callable=AsyncMock) as send:
             await handler(event_callback)
         edit.assert_awaited_once()
+        send.assert_awaited_once()
 
         async with self.factory() as session:
             self.assertIsNotNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
@@ -371,6 +373,33 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({interest.status for interest in interests}, {"withdrawn"})
             match = await session.scalar(select(Match).where(Match.event_id == event.id))
             self.assertEqual(match.status, "closed")
+
+    async def test_fixed_demo_profile_is_available_for_any_company_search_event(self):
+        event = await self.event("Ordinary event")
+        async with self.factory() as session:
+            demo_user = await session.get(User, self.other.id)
+            demo_user.max_user_id = DEMO_MAX_USER_ID
+            feed = FeedRepository(session)
+            user_plan = await feed.want_to_go(self.user.id, event.id)
+            await feed.set_company_search(self.user.id, user_plan.plan_id, looking=True)
+            self.assertTrue(await DemoRepository(session).ensure_candidates_for_plan(
+                user_id=self.user.id,
+                user_plan_id=user_plan.plan_id,
+            ))
+            await session.commit()
+
+        async with self.factory() as session:
+            demo_plan = await session.scalar(select(EventPlan).where(
+                EventPlan.user_id == self.other.id,
+                EventPlan.event_id == event.id,
+            ))
+            self.assertIsNotNone(demo_plan)
+            self.assertEqual((demo_plan.status, demo_plan.company_status), ("planned", "looking"))
+            interest = await session.scalar(select(CompanionInterest).where(
+                CompanionInterest.sender_plan_id == demo_plan.id,
+                CompanionInterest.recipient_plan_id == user_plan.plan_id,
+            ))
+            self.assertEqual((interest.event_id, interest.status), (event.id, "active"))
 
     async def test_user_cannot_cancel_another_users_plan(self):
         event = await self.event()
