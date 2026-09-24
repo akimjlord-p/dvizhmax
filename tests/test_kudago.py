@@ -32,6 +32,7 @@ class KudaGoTests(unittest.IsolatedAsyncioTestCase):
         draft = normalize_event(EVENT, city_id=uuid4())
         self.assertEqual(draft.external_id, "123")
         self.assertEqual(draft.title, "Лекция о городе")
+        self.assertEqual(draft.price_text, "от 1200 до 2400 рублей")
         self.assertEqual(draft.price_min, Decimal("1200"))
         self.assertEqual(draft.age_min, 18)
         self.assertEqual(draft.place.external_id, "77")
@@ -46,6 +47,23 @@ class KudaGoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(draft.price_min)
         self.assertTrue(draft.is_free)
         self.assertEqual(draft.images, ())
+
+    def test_price_parser_uses_only_ruble_amounts(self):
+        payload = {
+            "id": 3,
+            "title": "Event",
+            "price": "от 1800 рублей за 1 человека, группа до 20 человек — 15 000 рублей",
+        }
+        draft = normalize_event(payload, city_id=uuid4())
+        self.assertEqual(draft.price_text, "от 1800 рублей за 1 человека, группа до 20 человек — 15000 рублей")
+        self.assertEqual(draft.price_min, Decimal("1800"))
+
+    def test_price_without_rubles_is_not_used_for_filters(self):
+        draft = normalize_event(
+            {"id": 4, "title": "Event", "price": "до 20 человек"},
+            city_id=uuid4(),
+        )
+        self.assertIsNone(draft.price_min)
 
     def test_normalize_event_with_unsupported_timestamp(self):
         payload = {"id": 2, "title": "Event", "dates": [{"start": 10**20, "end": 10**20}]}

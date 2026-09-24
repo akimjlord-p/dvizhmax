@@ -177,6 +177,13 @@ class FeedRecommendationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Event", result)
         self.assertNotIn("https://example.test/event", result)
 
+    def test_card_price_has_no_thousands_separators(self):
+        event = replace(
+            card(score="0", primary="concert"),
+            price_text="от 1 800 до 15 000 рублей",
+        )
+        self.assertIn("💸 от 1800 до 15000 рублей", card_text(event))
+
     def test_card_hides_description_and_has_source_link_button(self):
         event = card(score="0", primary="concert", description="Long <event> description")
         self.assertNotIn("Long <event> description", card_text(event))

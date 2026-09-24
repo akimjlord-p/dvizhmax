@@ -15,6 +15,7 @@ from maxapi.types import AttachmentUpload, ButtonsPayload, CallbackButton, Comma
 from maxapi.types.attachments.attachment import Attachment, OtherAttachmentPayload
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from integrations.kudago import format_price_text
 from infrastructure.cache.feed_buffer import FeedBufferStore
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingError, OnboardingRepository
 from infrastructure.db.repositories.feed import EventCard
@@ -120,7 +121,7 @@ def card_text(card: EventCard) -> str:
     if card.is_free:
         parts.append("💸 Бесплатно")
     elif card.price_text:
-        parts.append(f"💸 {card.price_text}")
+        parts.append(f"💸 {format_price_text(card.price_text)}")
     else:
         parts.append("💸 Цена уточняется")
     if card.data_status == "uncertain":

@@ -238,7 +238,8 @@ def normalize_event(
     images = _normalize_images(payload.get("images"))
     schedules = _normalize_schedules(payload.get("dates"))
     is_free = _optional_bool(payload.get("is_free"))
-    price_text = _clean_text(payload.get("price"))
+    source_price_text = _clean_text(payload.get("price"))
+    price_text = format_price_text(source_price_text)
     return EventDraft(
         source=source,
         external_id=external_id,
@@ -248,7 +249,7 @@ def normalize_event(
         city_id=city_id,
         place=place,
         price_text=price_text,
-        price_min=None if is_free is True else _minimum_price(price_text),
+        price_min=None if is_free is True else _minimum_price(source_price_text),
         currency=currency,
         is_free=is_free,
         age_min=_age_min(payload.get("age_restriction")),
@@ -299,19 +300,39 @@ def _age_min(value: Any) -> int | None:
     return int(match.group(1)) if match else None
 
 
-_PRICE_RE = re.compile(r"(?<!\d)(\d{1,6}(?:[\s.]\d{3})*(?:,\d{1,2})?)(?!\d)")
+_THOUSANDS_GROUP_RE = re.compile(r"(?<!\d)\d{1,3}(?:[ \u00a0]\d{3})+(?!\d)")
+_PRICE_AMOUNT = r"(?:\d{1,3}(?:[ \u00a0.]\d{3})+|\d+)"
+_RUBLE_PRICE_RE = re.compile(
+    rf"(?<![\d.,])(?P<first>{_PRICE_AMOUNT})"
+    rf"(?:\s*(?:до|[-–—])\s*(?P<second>{_PRICE_AMOUNT}))?"
+    r"\s*(?:₽|руб\.?\b|рубл(?:ей|я|ь)\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def format_price_text(value: str | None) -> str | None:
+    """Make price text compact without changing its wording or meaning."""
+    if value is None:
+        return None
+    return _THOUSANDS_GROUP_RE.sub(
+        lambda match: match.group().replace(" ", "").replace("\u00a0", ""),
+        value,
+    )
 
 
 def _minimum_price(value: str | None) -> Decimal | None:
     if not value or "бесплат" in value.lower():
         return None
     prices: list[Decimal] = []
-    for match in _PRICE_RE.findall(value):
-        normalized = match.replace(" ", "").replace(".", "").replace(",", ".")
-        try:
-            prices.append(Decimal(normalized))
-        except InvalidOperation:
-            continue
+    for match in _RUBLE_PRICE_RE.finditer(value):
+        for amount in (match.group("first"), match.group("second")):
+            if amount is None:
+                continue
+            normalized = amount.replace(" ", "").replace("\u00a0", "").replace(".", "")
+            try:
+                prices.append(Decimal(normalized))
+            except InvalidOperation:
+                continue
     return min(prices) if prices else None
 
 
