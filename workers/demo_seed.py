@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 from dotenv import load_dotenv
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from infrastructure.db.models import City, Event, EventSchedule, EventSource, EventTag, Tag
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_PROFILES
@@ -16,6 +17,16 @@ from infrastructure.db.social_models import EventPlan, User
 
 DEMO_SOURCE = "dvizhmax_demo"
 DEMO_SOURCE_ID = "match-flow-v1"
+
+
+def _team_demo_user_ids() -> tuple[int, ...]:
+    """Read real team profiles that should participate in the fixed demo."""
+    raw_ids = os.getenv("DEMO_TEAM_MAX_USER_IDS", "")
+    values = [value.strip() for value in raw_ids.split(",") if value.strip()]
+    try:
+        return tuple(dict.fromkeys(int(value) for value in values))
+    except ValueError as exc:
+        raise ValueError("DEMO_TEAM_MAX_USER_IDS must be a comma-separated list of MAX user IDs") from exc
 
 
 async def _meeting_tag(session) -> Tag:
@@ -94,7 +105,6 @@ async def _demo_event(session, city: City) -> Event:
 
 
 async def _seed_profiles(session, event: Event) -> None:
-    profile_ids: list[UUID] = []
     for profile in DEMO_PROFILES:
         user = await session.scalar(select(User).where(User.max_user_id == profile.max_user_id))
         if user is None:
@@ -111,8 +121,6 @@ async def _seed_profiles(session, event: Event) -> None:
         user.profile_status = "active"
         user.onboarding_step = "complete"
         await session.flush()
-        profile_ids.append(user.id)
-
         plan = await session.scalar(select(EventPlan).where(
             EventPlan.user_id == user.id,
             EventPlan.event_id == event.id,
@@ -123,13 +131,28 @@ async def _seed_profiles(session, event: Event) -> None:
         plan.status = "planned"
         plan.company_status = "looking"
 
-    # Old seeds could attach a demo profile to a real event. Keep demo users
-    # visible only on the fixed demo event from now on.
-    await session.execute(
-        update(EventPlan)
-        .where(EventPlan.user_id.in_(profile_ids), EventPlan.event_id != event.id)
-        .values(status="cancelled", company_status="not_looking")
-    )
+
+async def _seed_team_profiles(session, event: Event) -> int:
+    """Add opted-in team profiles to the fixed demo event as real candidates."""
+    max_user_ids = _team_demo_user_ids()
+    if not max_user_ids:
+        return 0
+    users = list((await session.scalars(select(User).where(
+        User.max_user_id.in_(max_user_ids),
+        User.profile_status == "active",
+        User.onboarding_step == "complete",
+    ))).all())
+    for user in users:
+        plan = await session.scalar(select(EventPlan).where(
+            EventPlan.user_id == user.id,
+            EventPlan.event_id == event.id,
+        ))
+        if plan is None:
+            plan = EventPlan(user_id=user.id, event_id=event.id)
+            session.add(plan)
+        plan.status = "planned"
+        plan.company_status = "looking"
+    return len(users)
 
 
 async def main() -> None:
@@ -143,8 +166,9 @@ async def main() -> None:
                 raise RuntimeError("Сначала загрузите каталог Москвы")
             event = await _demo_event(session, city)
             await _seed_profiles(session, event)
+            team_profiles = await _seed_team_profiles(session, event)
             await session.commit()
-            print(f"Fixed demo match is ready for event {event.id}")
+            print(f"Fixed demo match is ready for event {event.id}; team profiles={team_profiles}")
     finally:
         await engine.dispose()
 
