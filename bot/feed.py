@@ -600,7 +600,13 @@ def register_feed_handlers(
             original = event._require_message()
             attachments = _without_buttons(original.body.attachments, removed)
             if extra_rows:
-                attachments.append(ButtonsPayload(buttons=extra_rows).pack())
+                # MAX allows a single inline keyboard per message: merge into the existing one.
+                keyboard = next((item for item in attachments if str(item.type) == "inline_keyboard"), None)
+                if keyboard is None:
+                    attachments.append(ButtonsPayload(buttons=extra_rows).pack())
+                else:
+                    merged = ButtonsPayload(buttons=extra_rows + keyboard.payload.buttons).pack()
+                    attachments[attachments.index(keyboard)] = merged
             text_value = f"{original.body.text}\n\n{status}" if original.body.text else status
             await event.edit(text_value, attachments=attachments, notify=False)
             callback_answered = True

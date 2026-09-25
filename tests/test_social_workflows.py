@@ -483,6 +483,40 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         edit = await self.click(f"feed:company:yes|{alice.plan_id}|plans|0")
         self.assertIn("Общие интересы: calm, lecture", edit.call_args.args[0])
 
+    async def test_match_from_likers_list_keeps_a_single_keyboard(self):
+        event = await self.event("Likers match")
+        async with self.factory() as session:
+            feed, people = FeedRepository(session), CompanionRepository(session)
+            alice = await feed.want_to_go(self.user.id, event.id)
+            bob = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, alice.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, bob.plan_id, looking=True)
+            await people.next_candidate(self.other.id, bob.plan_id)
+            await people.react(self.other.id, alice.plan_id, liked=True)
+            await people.next_liker(self.user.id, alice.plan_id)
+            await session.commit()
+        payload = f"feed:person_like:{bob.plan_id}|likers"
+        callback_event = MessageCallback.model_validate({
+            "update_type": "message_callback", "timestamp": 0,
+            "callback": {"timestamp": 0, "callback_id": "c1", "payload": payload,
+                         "user": {"user_id": 100, "first_name": "A", "is_bot": False, "last_activity_time": 0}},
+            "message": {"recipient": {"chat_id": 100, "chat_type": "dialog"}, "timestamp": 0,
+                        "body": {"mid": "m1", "seq": 1, "text": "Bob, 25", "attachments": [{"type": "inline_keyboard", "payload": {"buttons": [
+                            [{"type": "callback", "text": "👍 Пойти вместе", "payload": payload},
+                             {"type": "callback", "text": "Дальше", "payload": f"feed:person_skip:{bob.plan_id}|likers"}],
+                            [{"type": "callback", "text": "Афиша", "payload": "feed:browse:feed|0"}]]}}]}},
+        })
+        handler = await select_handler(self.dispatcher, callback_event)
+        with patch("bot.feed.send_match_notifications", new_callable=AsyncMock), \
+             patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
+             patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)):
+            await handler(callback_event)
+        attachments = edit.call_args.kwargs["attachments"]
+        # MAX rejects a message with more than one inline keyboard.
+        self.assertEqual(sum(str(item.type) == "inline_keyboard" for item in attachments), 1)
+        self.assertEqual(payloads(attachments)[0], f"feed:likers:{alice.plan_id}")
+        self.assertNotIn(payload, payloads(attachments))
+
     async def test_person_like_without_match_is_confirmed_on_the_card(self):
         event = await self.event("Person like")
         async with self.factory() as session:
