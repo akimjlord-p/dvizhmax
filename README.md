@@ -29,164 +29,22 @@
 | `/profile` | Анкета |
 | `/demo` | Демо-сценарий до мэтча |
 
-## Развёртывание
-
-Всё работает в Docker: PostgreSQL, Redis, миграции, бот и catalog-worker. Бот, миграции,
-worker и служебные команды запускаются из **одного образа** `dvizhmax-app`, поэтому
-`docker compose up -d --build` одной командой собирает его, применяет миграции и
-перезапускает бота и worker.
-
-Есть три варианта — они различаются только тем, как MAX доставляет сообщения боту:
-
-| Вариант | Когда подходит | Команда запуска |
-| --- | --- | --- |
-| **A. Long polling** | Локально или на сервере без домена | `docker compose -f docker-compose.yml -f docker-compose.polling.yml up -d --build` |
-| **B. Webhook + Caddy** | Сервер с доменом, порты 80 и 443 свободны | `docker compose -f docker-compose.yml -f docker-compose.webhook.yml up -d --build` |
-| **C. Webhook + nginx на хосте** | На сервере уже есть nginx (так работает наш прод) | `docker compose up -d --build` |
-
-Все три варианта проверены 2026-09-25 на Ubuntu x86_64 с Docker Compose v5: образ
-собирается с нуля примерно за 40 секунд, миграции доходят до `0007_match_contacts`,
-бот запускается от непривилегированного пользователя `app`.
-
-### Шаг 1. Подготовка (для всех вариантов)
-
-1. Установить [Docker Engine](https://docs.docker.com/engine/install/) и Docker Compose v2.24 или новее.
-2. Скачать код и создать `.env` из шаблона:
-
-   ```bash
-   git clone https://github.com/akimjlord-p/dvizhmax.git
-   cd dvizhmax
-   cp .env.example .env
-   ```
-
-3. Заполнить в `.env` обязательные значения (полный список — в разделе [Конфигурация](#конфигурация)):
-
-   | Переменная | Что указать |
-   | --- | --- |
-   | `POSTGRES_PASSWORD` | Любой длинный пароль |
-   | `DATABASE_URL` | `postgresql+psycopg://dvizhmax:ТОТ_ЖЕ_ПАРОЛЬ@postgres:5432/dvizhmax` |
-   | `MAX_BOT_TOKEN` | Токен бота из кабинета MAX для партнёров |
-   | `YANDEX_API_KEY`, `YANDEX_FOLDER_ID` | Ключ Yandex AI Studio; без него события не размечаются и не попадают в ленту |
-   | `MAX_WEBHOOK_SECRET` | Для вариантов B и C: 5–256 символов, латиница, цифры, `-`, `_` |
-
-### Шаг 2A. Long polling
-
-Самый простой вариант: не нужны домен, сертификат и открытые порты.
+## Запуск
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.polling.yml up -d --build
-docker compose -f docker-compose.yml -f docker-compose.polling.yml logs -f bot
+git clone https://github.com/akimjlord-p/dvizhmax.git && cd dvizhmax
+cp .env.example .env   # POSTGRES_PASSWORD, DATABASE_URL, MAX_BOT_TOKEN, YANDEX_API_KEY, YANDEX_FOLDER_ID
 ```
 
-В логе должно появиться `Бот: @имя_бота` и `Зарегистрировано 11 обработчиков событий`.
-Напишите боту `/start` — ответ придёт сразу.
-
-> MAX не отдаёт сообщения через long polling, пока у бота настроен webhook. Для локальной
-> разработки используйте отдельного тестового бота. Если запустить polling с токеном
-> боевого бота, в логе будет `БОТ ИГНОРИРУЕТ POLLING! Обнаружены установленные подписки`.
-
-### Шаг 2B. Webhook + Caddy (всё в Docker)
-
-Нужны домен с A-записью на IP сервера и свободные порты 80 и 443. HTTPS-сертификат
-Caddy получает и продлевает сам.
-
-1. Дописать домен в `.env`:
-
-   ```env
-   DOMAIN=bot.example.com
-   ```
-
-   Адрес webhook (`https://DOMAIN/max/webhook`) собирается автоматически, `MAX_WEBHOOK_URL` задавать не нужно.
-
-2. Запустить:
-
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.webhook.yml up -d --build
-   ```
-
-3. Проверить, что запросы доходят до бота:
-
-   ```bash
-   curl -s -o /dev/null -w "%{http_code}\n" -X POST https://bot.example.com/max/webhook
-   ```
-
-   Ожидаемый ответ — `403`: бот отклоняет запрос без секрета, значит, Caddy до него проксирует.
-   При старте бот сам подписывается на webhook в MAX. Конфиг прокси — `deploy/caddy/Caddyfile`.
-
-Чтобы не писать `-f` в каждой команде: `alias dc='docker compose -f docker-compose.yml -f docker-compose.webhook.yml'`.
-
-### Шаг 2C. Webhook + nginx на хосте
-
-Бот слушает только `127.0.0.1:8080`, nginx сервера проксирует на него `/max/webhook`.
-
-1. Дописать в `.env`:
-
-   ```env
-   MAX_TRANSPORT=webhook
-   MAX_WEBHOOK_URL=https://bot.example.com/max/webhook
-   ```
-
-2. Подключить сайт в nginx и получить сертификат:
-
-   ```bash
-   sudo cp deploy/host-nginx/dvizhmax.conf /etc/nginx/sites-available/dvizhmax.conf
-   sudo sed -i 's/bot.example.com/ВАШ_ДОМЕН/g' /etc/nginx/sites-available/dvizhmax.conf
-   sudo ln -s /etc/nginx/sites-available/dvizhmax.conf /etc/nginx/sites-enabled/
-   sudo nginx -t && sudo systemctl reload nginx
-   sudo certbot --nginx -d ВАШ_ДОМЕН
-   ```
-
-   Если у домена уже есть сайт, достаточно добавить в него блок `location = /max/webhook`
-   из `deploy/host-nginx/dvizhmax.conf`.
-
-3. Запустить:
-
-   ```bash
-   docker compose up -d --build
-   ```
-
-### Шаг 3. Демо-данные
-
-После старта catalog-worker сразу начинает импорт афиши, он занимает несколько минут.
-Когда он закончится, создайте демо-событие и демо-анкеты:
-
-```bash
-docker compose --profile tools run --rm demo-seed
-```
-
-### Управление
-
-Команды показаны для варианта C. Для A и B добавьте те же `-f`, что при запуске.
-
-```bash
-docker compose ps                                        # статус контейнеров
-docker compose logs -f bot                               # логи бота
-docker compose restart bot                               # перезапуск бота
-docker compose down                                      # остановка; данные остаются в томах
-docker compose --profile tools run --rm demo-reset       # сбросить лайки, мэтчи и контакты на демо-событии
-docker compose --profile tools run --rm profile-reset    # удалить все реальные профили
-```
-
-Обновление до новой версии кода:
-
-```bash
-git pull --ff-only
-docker compose up -d --build
-```
-
-Команда пересобирает образ, применяет новые миграции (сервис `migrate` отрабатывает до
-запуска бота) и пересоздаёт бота и worker. PostgreSQL и Redis не перезапускаются.
-
-### Если что-то не работает
-
-| Симптом | Причина и решение |
+| Режим | Команда |
 | --- | --- |
-| Long polling: бот молчит, в логе `БОТ ИГНОРИРУЕТ POLLING` | У бота настроен webhook — нужен отдельный тестовый бот |
-| Webhook: `/max/webhook` отвечает 502 | Бот не запущен или слушает другой порт (`MAX_WEBHOOK_PORT`); смотреть `logs bot` |
-| Webhook: `/max/webhook` отвечает 404 | Путь в прокси не совпадает с `MAX_WEBHOOK_PATH` |
-| Caddy не получил сертификат | A-запись домена не указывает на сервер или закрыты порты 80/443; смотреть `logs caddy` |
-| `No such image: dvizhmax-app` | Служебная команда запущена до первой сборки — сначала `up -d --build` |
-| Лента пустая | Афиша ещё импортируется или не заданы ключи Yandex |
+| Long polling — локально, без домена | `docker compose -f docker-compose.yml -f docker-compose.polling.yml up -d --build` |
+| Webhook + Caddy — HTTPS сам, нужен `DOMAIN` в `.env` | `docker compose -f docker-compose.yml -f docker-compose.webhook.yml up -d --build` |
+| Webhook + nginx на хосте — `MAX_WEBHOOK_URL` в `.env`, конфиг `deploy/host-nginx/dvizhmax.conf` | `docker compose up -d --build` |
+
+Демо-данные после импорта афиши: `docker compose --profile tools run --rm demo-seed`.
+Обновление: `git pull && docker compose up -d --build`.
+Long polling не получает сообщений, пока у бота есть webhook, — для него нужен отдельный тестовый бот.
 
 ## Сценарий проверки
 
