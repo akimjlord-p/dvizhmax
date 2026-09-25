@@ -30,21 +30,6 @@ async def _register_webhook(bot: Bot) -> None:
         )
 
 
-async def _warn_if_webhook_subscribed(bot: Bot) -> None:
-    """MAX does not deliver long-polling updates while a webhook subscription exists."""
-    try:
-        subscriptions = (await bot.get_subscriptions()).subscriptions or []
-    except Exception:
-        logging.getLogger(__name__).exception("Unable to read MAX webhook subscriptions")
-        return
-    if subscriptions:
-        logging.getLogger(__name__).warning(
-            "Bot has webhook subscriptions %s; long polling will receive no updates. "
-            "Use a separate test bot token or remove the subscription.",
-            [subscription.url for subscription in subscriptions],
-        )
-
-
 async def main() -> None:
     load_dotenv()
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -62,7 +47,6 @@ async def main() -> None:
     )
     try:
         if transport == "long_polling":
-            await _warn_if_webhook_subscribed(bot)
             await dispatcher.start_polling(bot)
         elif transport == "webhook":
             try:
