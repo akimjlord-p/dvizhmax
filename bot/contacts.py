@@ -146,7 +146,7 @@ def register_contact_handlers(
                 async with session_factory() as session:
                     peer = await ContactRepository(session).start(user.id, match_id)
                     await session.commit()
-                await event.ack()
+                await event.ack("Пришли контакт — кнопка в сообщении ниже")
                 answered = True
                 await event.bot.send_message(
                     user_id=event.callback.user.user_id,

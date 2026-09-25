@@ -36,6 +36,12 @@ from test_bot_routing import callback, message, select_handler
 TEST_URL = os.getenv("TEST_DATABASE_URL")
 
 
+async def strict_ack(notification=None):
+    """MAX answers 400 to a callback answer without a notification or message."""
+    if not notification:
+        raise AssertionError("MAX rejects an empty callback answer")
+
+
 def payloads(attachments):
     return [button.payload for item in attachments if str(item.type) == "inline_keyboard"
             for row in item.payload.buttons for button in row if hasattr(button, "payload")]
@@ -116,7 +122,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         handler = await select_handler(self.dispatcher, event)
         self.assertIsNotNone(handler)
         with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
-             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+             patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)) as ack:
             await handler(event)
             self.assertFalse(ack.called, ack.call_args)
             return edit
@@ -299,7 +305,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         callback_event = callback("feed:browse:feed|0", 100)
         handler = await select_handler(self.dispatcher, callback_event)
         with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=[rejected, None]) as edit, \
-             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+             patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)) as ack:
             await handler(callback_event)
         self.assertFalse(ack.called)
         self.assertEqual(edit.await_count, 2)
@@ -328,7 +334,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         handler = await select_handler(self.dispatcher, event)
         event.bot = SimpleNamespace(me=None, send_message=AsyncMock())
         with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
-             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+             patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)) as ack:
             await handler(event)
         return event.bot.send_message, edit, ack
 
@@ -433,7 +439,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         handler = await select_handler(self.dispatcher, callback_event)
         callback_event.bot = SimpleNamespace(me=None, send_message=AsyncMock())
         with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=RuntimeError("MAX down")), \
-             patch.object(MessageCallback, "ack", new_callable=AsyncMock):
+             patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)):
             await handler(callback_event)
         edit = await self.click("feed:browse:feed|0")
         self.assertIn("Requeue me", edit.call_args.args[0])
@@ -460,7 +466,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 handler = await select_handler(self.dispatcher, callback_event)
                 with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
                      patch.object(MessageCallback, "send", new_callable=AsyncMock) as send, \
-                     patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+                     patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)) as ack:
                     await handler(callback_event)
                 self.assertFalse(ack.called)
                 send.assert_awaited_once()
@@ -475,9 +481,9 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         handler = await select_handler(self.dispatcher, callback_event)
         callback_event.bot = SimpleNamespace(me=None, send_message=AsyncMock())
         with patch("bot.feed.FeedBufferStore.pop", new=AsyncMock(side_effect=RuntimeError("redis down"))), \
-             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+             patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)) as ack:
             await handler(callback_event)
-        ack.assert_awaited_once_with()
+        ack.assert_awaited_once_with("Не получилось выполнить действие")
         sent = callback_event.bot.send_message.await_args
         self.assertEqual(sent.kwargs["text"], ERROR_TEXT)
         self.assertEqual(payloads(sent.kwargs["attachments"]), ["feed:browse:feed|0", MENU_PAYLOAD])
@@ -520,7 +526,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         handler = await select_handler(self.dispatcher, event_callback)
         event_callback.bot = SimpleNamespace(me=None, send_message=AsyncMock())
         with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=RuntimeError("MAX unavailable")), \
-             patch.object(MessageCallback, "ack", new_callable=AsyncMock):
+             patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)):
             await handler(event_callback)
         self.assertEqual(event_callback.bot.send_message.await_args.kwargs["text"], ERROR_TEXT)
         async with self.factory() as session:

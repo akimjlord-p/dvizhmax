@@ -34,9 +34,11 @@ def error_actions(retry_payload: str | None) -> list:
 
 async def report_error(event, retry_payload: str | None, *, answered: bool) -> None:
     """Tell the user an action failed and let them retry instead of a silent button."""
+    # MAX rejects a callback answer without a notification text.
     try:
         if not answered:
-            await event.ack()
+            await event.ack("Не получилось выполнить действие")
+            answered = True
         await event.bot.send_message(
             user_id=event.callback.user.user_id,
             text=ERROR_TEXT,
