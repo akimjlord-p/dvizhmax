@@ -21,7 +21,7 @@ from integrations.kudago import format_price_text
 from infrastructure.cache.feed_buffer import FeedBufferStore
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingError, OnboardingRepository
 from infrastructure.db.repositories.feed import EventCard
-from .navigation import menu, menu_rows, profile_offer
+from .navigation import menu, menu_rows, plans_and_feed, profile_offer, report_error
 from .notifications import send_match_notifications
 
 MAX_EVENT_IMAGE_BYTES = 5 * 1024 * 1024
@@ -31,6 +31,8 @@ FEED_REFILL_TRIGGER_REMAINING = 1
 PLACEHOLDER_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "images" / "event-no-image.jpg"
 DEMO_PROFILE_ASSETS_DIR = PLACEHOLDER_IMAGE_PATH.parent
 LOGGER = logging.getLogger(__name__)
+NO_CANDIDATES_TEXT = "Других анкет для этого события пока нет. Попробуй поиск позже."
+PERSON_LIKED_STATUS = "👍 Лайк отправлен. Если интерес будет взаимным — сообщим о мэтче."
 
 _placeholder_attachment: AttachmentUpload | None = None
 _placeholder_attachment_lock = asyncio.Lock()
@@ -52,7 +54,7 @@ def _buttons(
 ) -> list:
     if mode == "liked":
         rows = [
-            [CallbackButton(text="Пойду", payload=f"feed:want:{card.id}|liked|{index}")],
+            [CallbackButton(text="Хочу пойти", payload=f"feed:want:{card.id}|liked|{index}")],
             [CallbackButton(text="Убрать лайк", payload=f"feed:unlike:{card.id}|liked|{index}")],
         ]
     elif mode == "plans":
@@ -70,12 +72,12 @@ def _buttons(
     else:
         rows = [
             [
-                CallbackButton(text="Нравится", payload=f"feed:like:{card.id}"),
-                CallbackButton(text="Не интересно", payload=f"feed:skip:{card.id}"),
+                CallbackButton(text="👍 Нравится", payload=f"feed:like:{card.id}"),
+                CallbackButton(text="Не моё", payload=f"feed:skip:{card.id}"),
             ],
-            [CallbackButton(text="Пойду", payload=f"feed:want:{card.id}")],
+            [CallbackButton(text="Хочу пойти", payload=f"feed:want:{card.id}")],
         ]
-    rows.append([LinkButton(text="Подробнее", url=card.source_url)])
+    rows.append([LinkButton(text=_source_label(card.source_url), url=card.source_url)])
     if mode != "feed":
         navigation = []
         if index > 0:
@@ -85,6 +87,11 @@ def _buttons(
         if navigation:
             rows.append(navigation)
     return [ButtonsPayload(buttons=rows + menu_rows()).pack()]
+
+
+def _source_label(url: str) -> str:
+    host = urlparse(url).hostname or ""
+    return "Подробнее в KudaGo ↗" if host == "kudago.com" or host.endswith(".kudago.com") else "Подробнее ↗"
 
 
 def _without_buttons(attachments: list | None, payloads: set[str]) -> list:
@@ -142,7 +149,7 @@ def card_text(card: EventCard) -> str:
     else:
         parts.append("💸 Цена уточняется")
     if card.data_status == "uncertain":
-        parts.append("⚠️ Данные могут быть неактуальны — проверь их по ссылке.")
+        parts.append("⚠️ Информация могла измениться. Проверь дату и условия у источника.")
     return "\n\n".join(parts)
 
 
@@ -349,9 +356,17 @@ def register_feed_handlers(
     async def show_next(answer, user_id: UUID, bot: Bot) -> None:
         card = await next_buffered_card(user_id)
         if card is None:
-            await answer("Пока нет новых подходящих мероприятий. Каталог обновляется два раза в день.", attachments=menu())
+            await answer(
+                "Новых событий пока нет — ты уже посмотрел доступную подборку. Загляни позже.",
+                attachments=menu(),
+            )
             return
-        await render_event_card(answer, card, bot=bot, mode="feed")
+        try:
+            await render_event_card(answer, card, bot=bot, mode="feed")
+        except Exception:
+            # The card was taken from the queue; put it back so it is not lost.
+            await feed_buffer.requeue(user_id, card.id)
+            raise
 
     async def browse(answer, user_id: UUID, bot: Bot, mode: str, index: int = 0) -> None:
         if mode == "feed":
@@ -387,10 +402,7 @@ def register_feed_handlers(
         async with session_factory() as session:
             card = await CompanionRepository(session).next_candidate(user_id, plan_id)
             if card is None:
-                await answer(
-                    "Пока нет подходящих людей для этого события. Попробуй открыть поиск компании позже.",
-                    attachments=menu(),
-                )
+                await answer(NO_CANDIDATES_TEXT, attachments=plans_and_feed())
                 return
             await render_companion(answer, card, bot=bot)
             # If sending fails, the session rolls back the reserved view.
@@ -412,14 +424,11 @@ def register_feed_handlers(
 
     async def render_companion(answer, card, *, bot: Bot, likers: bool = False) -> None:
         details = ["❤️ Этот человек хочет пойти с тобой"] if likers else []
-        details.append(card.name)
-        profile_details = []
+        heading = card.name if card.age is None else f"{card.name}, {card.age}"
         if card.gender:
-            profile_details.append({"male": "Мужчина", "female": "Женщина"}.get(card.gender, card.gender))
-        if card.age is not None:
-            profile_details.append(f"{card.age} лет")
-        if profile_details:
-            details.append(", ".join(profile_details))
+            gender = {"male": "Мужчина", "female": "Женщина"}.get(card.gender, card.gender)
+            heading = f"{heading}\n{gender}"
+        details.append(heading)
         if card.description:
             details.append(card.description)
         suffix = "|likers" if likers else ""
@@ -427,7 +436,7 @@ def register_feed_handlers(
             ButtonsPayload(
                 buttons=[
                     [
-                        CallbackButton(text="Нравится", payload=f"feed:person_like:{card.plan_id}{suffix}"),
+                        CallbackButton(text="👍 Пойти вместе", payload=f"feed:person_like:{card.plan_id}{suffix}"),
                         CallbackButton(text="Дальше", payload=f"feed:person_skip:{card.plan_id}{suffix}"),
                     ]
                 ] + menu_rows()
@@ -445,11 +454,11 @@ def register_feed_handlers(
 
     async def ask_about_company(answer, plan_id: UUID, mode: str = "feed", index: int = 0) -> None:
         await answer(
-            "Добавили событие в планы. Хочешь найти компанию?",
+            "Событие добавлено в планы. Хочешь найти людей, которые тоже собираются пойти?",
             attachments=[
                 ButtonsPayload(
                     buttons=[
-                        [CallbackButton(text="Да, ищу компанию", payload=f"feed:company:yes|{plan_id}|{mode}|{index}")],
+                        [CallbackButton(text="Найти компанию", payload=f"feed:company:yes|{plan_id}|{mode}|{index}")],
                         [CallbackButton(text="Пока нет", payload=f"feed:company:no|{plan_id}|{mode}|{index}")],
                     ]
                 ).pack()
@@ -564,8 +573,25 @@ def register_feed_handlers(
             if isinstance(sent, BaseException):
                 raise sent
 
+        async def mark_current(status: str, removed: set[str], extra_rows: list | None = None) -> None:
+            nonlocal callback_answered
+            if event.message is None:
+                rows = (extra_rows or []) + menu_rows()
+                await edit_current(status, attachments=[ButtonsPayload(buttons=rows).pack()])
+                callback_answered = True
+                return
+            original = event._require_message()
+            attachments = _without_buttons(original.body.attachments, removed)
+            if extra_rows:
+                attachments.append(ButtonsPayload(buttons=extra_rows).pack())
+            text_value = f"{original.body.text}\n\n{status}" if original.body.text else status
+            await event.edit(text_value, attachments=attachments, notify=False)
+            callback_answered = True
+
         try:
-            if action == "browse":
+            if action == "menu":
+                await send_next_card("Главное меню", attachments=menu())
+            elif action == "browse":
                 mode, index = value.split("|")
                 await browse(send_next_card, user_id, event.bot, mode, int(index))
             elif action in {"like", "skip"}:
@@ -579,7 +605,7 @@ def register_feed_handlers(
                 removed = {f"feed:like:{value}", f"feed:skip:{value}"}
                 if action == "skip":
                     removed.add(f"feed:want:{value}")
-                reacted_card = ("✅ Нравится" if action == "like" else "✖️ Не интересно", removed)
+                reacted_card = ("✅ Нравится" if action == "like" else "✖️ Не моё", removed)
                 await show_next(send_next_card, user_id, event.bot)
             elif action == "want":
                 values = value.split("|")
@@ -606,7 +632,7 @@ def register_feed_handlers(
                 choice, plan_raw = values[:2]
                 mode, index = (values[2], int(values[3])) if len(values) == 4 else ("plans", 0)
                 if choice not in {"yes", "no"}:
-                    raise OnboardingError("Unknown company choice")
+                    raise OnboardingError("Неизвестный вариант ответа")
                 user = await current_user(event.callback.user.user_id)
                 if choice == "yes" and user.profile_status != "active":
                     await edit_current("План сохранён. Для поиска компании нужна анкета. Хочешь её создать?",
@@ -637,16 +663,17 @@ def register_feed_handlers(
                 if not result.was_applied:
                     await event.ack("Эта анкета уже оценена")
                     return
+                removed = {f"feed:person_like:{value}", f"feed:person_skip:{value}"}
                 if result.created_match and result.match_id is not None:
                     await send_match_notifications(event.bot, session_factory, result.match_id)
-                    rows = menu_rows()
-                    if from_likers:
-                        rows = [[CallbackButton(text="Кто ещё лайкнул", payload=f"feed:likers:{result.owner_plan_id}")]] + rows
-                    await edit_current(
-                        "У вас мэтч! Мы отправили вам обоим ссылки на профили MAX.",
-                        attachments=[ButtonsPayload(buttons=rows).pack()],
+                    extra_rows = (
+                        [[CallbackButton(text="Кто ещё лайкнул", payload=f"feed:likers:{result.owner_plan_id}")]]
+                        if from_likers else None
                     )
-                elif from_likers:
+                    await mark_current("🎉 Есть мэтч! Подробности — в сообщении ниже.", removed, extra_rows)
+                    return
+                reacted_card = (PERSON_LIKED_STATUS if action == "person_like" else "➡️ Пропущено", removed)
+                if from_likers:
                     await show_liker(send_next_card, user_id, result.owner_plan_id, event.bot)
                 else:
                     await show_companion(send_next_card, user_id, result.owner_plan_id, event.bot)
@@ -657,5 +684,11 @@ def register_feed_handlers(
             await event.ack(str(exc))
         except Exception:
             LOGGER.exception("Feed callback %r failed", event.callback.payload)
-            if not callback_answered:
-                await event.ack("Что-то пошло не так. Попробуй ещё раз")
+            # A reaction may already be saved; retrying it would only say "already rated".
+            retry = {
+                "like": "feed:browse:feed|0",
+                "skip": "feed:browse:feed|0",
+                "person_like": "feed:browse:plans|0",
+                "person_skip": "feed:browse:plans|0",
+            }.get(action, event.callback.payload)
+            await report_error(event, retry, answered=callback_answered)

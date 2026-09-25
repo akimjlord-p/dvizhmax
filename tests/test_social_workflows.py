@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -15,17 +16,20 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from maxapi import Dispatcher
 from maxapi.exceptions.max import MaxApiError
-from maxapi.types import MessageCallback
+from maxapi.types import MessageCallback, MessageCreated
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from bot.contacts import register_contact_handlers
 from bot.feed import register_feed_handlers
 from bot.onboarding import CONSENT_VERSION, register_onboarding_handlers
 from infrastructure.db.models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Tag
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, NotificationRepository, OnboardingRepository, OnboardingError
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_MAX_USER_ID
-from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, User, UserTagWeight
+from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact, User, UserTagWeight
+from bot.feed import NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
+from bot.navigation import ERROR_TEXT, MENU_PAYLOAD
 from test_bot_routing import callback, message, select_handler
 
 
@@ -79,6 +83,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.dispatcher = Dispatcher()
         register_onboarding_handlers(self.dispatcher, self.factory)
         register_feed_handlers(self.dispatcher, self.factory)
+        register_contact_handlers(self.dispatcher, self.factory)
 
     async def asyncTearDown(self):
         await self.transaction.rollback()
@@ -279,7 +284,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         handler = await select_handler(self.dispatcher, event_message)
         with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
             await handler(event_message)
-        self.assertIn("Выбери действие кнопкой ниже", answer.call_args.args[0])
+        self.assertIn("Сейчас здесь нужно выбрать действие кнопкой ниже", answer.call_args.args[0])
         self.assertIn("onboarding:gender:male", payloads(answer.call_args.kwargs["attachments"]))
         async with self.factory() as session:
             self.assertEqual((await session.get(User, self.user.id)).onboarding_step, "gender")
@@ -303,10 +308,140 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("example.test/broken.jpg", str(retry))
         self.assertIn("Broken photo", edit.call_args.args[0])
 
+    async def matched_pair(self, title="Contact event"):
+        event = await self.event(title)
+        async with self.factory() as session:
+            feed, people = FeedRepository(session), CompanionRepository(session)
+            alice = await feed.want_to_go(self.user.id, event.id)
+            bob = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, alice.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, bob.plan_id, looking=True)
+            await people.next_candidate(self.user.id, alice.plan_id)
+            await people.react(self.user.id, bob.plan_id, liked=True)
+            await people.next_candidate(self.other.id, bob.plan_id)
+            result = await people.react(self.other.id, alice.plan_id, liked=True)
+            await session.commit()
+        return result.match_id
+
+    async def press(self, payload, max_id=100):
+        event = callback(payload, max_id)
+        handler = await select_handler(self.dispatcher, event)
+        event.bot = SimpleNamespace(me=None, send_message=AsyncMock())
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
+             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+            await handler(event)
+        return event.bot.send_message, edit, ack
+
+    async def send_contact(self, max_id=100, *, text=None, contact=None):
+        body = {"mid": "m2", "seq": 2, "text": text}
+        if contact is not None:
+            body["attachments"] = [{"type": "contact", "payload": contact}]
+        event = MessageCreated.model_validate({
+            "update_type": "message_created", "timestamp": 0,
+            "message": {"sender": {"user_id": max_id, "first_name": "A", "is_bot": False, "last_activity_time": 0},
+                        "recipient": {"chat_id": max_id, "chat_type": "dialog"}, "timestamp": 0, "body": body},
+        })
+        handler = await select_handler(self.dispatcher, event)
+        with patch.object(type(event.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(event)
+        return answer
+
+    async def test_match_contact_is_shared_with_the_native_button_after_confirmation(self):
+        match_id = await self.matched_pair()
+        send, _, _ = await self.press(f"contact:share:{match_id}")
+        prompt = send.await_args.kwargs
+        self.assertIn("Bob", prompt["text"])
+        keyboard = prompt["attachments"][0].payload.buttons
+        self.assertEqual(str(keyboard[0][0].type), "request_contact")
+
+        vcf = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+79990001122\nEND:VCARD"
+        answer = await self.send_contact(contact={"vcf_info": vcf, "max_info": {
+            "user_id": 100, "first_name": "Alice", "is_bot": False, "last_activity_time": 0}})
+        self.assertIn("Отправить этот контакт пользователю Bob?", answer.call_args.args[0])
+        self.assertIn("+79990001122", answer.call_args.args[0])
+        async with self.factory() as session:
+            user = await session.get(User, self.user.id)
+            self.assertEqual(user.name, "Alice")  # the contact did not leak into the profile
+
+        send, edit, _ = await self.press(f"contact:confirm:{match_id}")
+        delivered = send.await_args.kwargs
+        self.assertEqual(delivered["user_id"], 200)
+        self.assertIn("Alice делится контактом", delivered["text"])
+        self.assertIn("+79990001122", delivered["text"])
+        card = delivered["attachments"][0]
+        self.assertEqual(card.model_dump()["payload"]["contact_id"], 100)
+        self.assertIn(f"contact:share:{match_id}", payloads(delivered["attachments"][1:]))
+        self.assertIn("Контакт отправлен: Bob", edit.call_args.args[0])
+
+        _, _, ack = await self.press(f"contact:confirm:{match_id}")
+        ack.assert_awaited_once_with("Контакт уже отправлен")
+        async with self.factory() as session:
+            row = await session.scalar(select(MatchContact).where(MatchContact.match_id == match_id))
+            self.assertEqual(row.status, "sent")
+
+    async def test_cancelled_contact_is_not_sent_and_text_goes_back_to_normal(self):
+        match_id = await self.matched_pair("Cancel contact")
+        await self.press(f"contact:share:{match_id}")
+        await self.send_contact(text="https://max.ru/join/abc")
+        send, edit, _ = await self.press(f"contact:cancel:{match_id}")
+        send.assert_not_awaited()
+        self.assertIn("Контакт не отправлен", edit.call_args.args[0])
+        answer = await self.send_contact(text="привет")
+        self.assertIn("нужно выбрать действие", answer.call_args.args[0])
+
+    async def test_contact_for_a_demo_peer_is_not_delivered(self):
+        match_id = await self.matched_pair("Demo contact")
+        async with self.factory() as session:
+            (await session.get(User, self.other.id)).max_user_id = DEMO_MAX_USER_ID
+            await session.commit()
+        await self.press(f"contact:share:{match_id}")
+        await self.send_contact(text="@alice")
+        send, edit, _ = await self.press(f"contact:confirm:{match_id}")
+        send.assert_not_awaited()
+        self.assertIn("демо-анкета", edit.call_args.args[0])
+
+    async def test_person_like_without_match_is_confirmed_on_the_card(self):
+        event = await self.event("Person like")
+        async with self.factory() as session:
+            feed, people = FeedRepository(session), CompanionRepository(session)
+            alice = await feed.want_to_go(self.user.id, event.id)
+            bob = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, alice.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, bob.plan_id, looking=True)
+            await people.next_candidate(self.user.id, alice.plan_id)
+            await session.commit()
+        callback_event = MessageCallback.model_validate({
+            "update_type": "message_callback", "timestamp": 0,
+            "callback": {"timestamp": 0, "callback_id": "c1", "payload": f"feed:person_like:{bob.plan_id}",
+                         "user": {"user_id": 100, "first_name": "A", "is_bot": False, "last_activity_time": 0}},
+            "message": {"recipient": {"chat_id": 100, "chat_type": "dialog"}, "timestamp": 0,
+                        "body": {"mid": "m1", "seq": 1, "text": "Bob, 25", "attachments": [{"type": "inline_keyboard", "payload": {"buttons": [[
+                            {"type": "callback", "text": "👍 Пойти вместе", "payload": f"feed:person_like:{bob.plan_id}"},
+                            {"type": "callback", "text": "Дальше", "payload": f"feed:person_skip:{bob.plan_id}"}]]}}]}},
+        })
+        handler = await select_handler(self.dispatcher, callback_event)
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock) as edit, \
+             patch.object(MessageCallback, "send", new_callable=AsyncMock) as send:
+            await handler(callback_event)
+        self.assertEqual(edit.call_args.args[0], f"Bob, 25\n\n{PERSON_LIKED_STATUS}")
+        self.assertFalse(payloads(edit.call_args.kwargs["attachments"]))
+        self.assertEqual(send.call_args.args[0], NO_CANDIDATES_TEXT)
+
+    async def test_card_that_failed_to_send_returns_to_the_feed_queue(self):
+        event = await self.event("Requeue me")
+        callback_event = callback("feed:browse:feed|0", 100)
+        handler = await select_handler(self.dispatcher, callback_event)
+        callback_event.bot = SimpleNamespace(me=None, send_message=AsyncMock())
+        with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=RuntimeError("MAX down")), \
+             patch.object(MessageCallback, "ack", new_callable=AsyncMock):
+            await handler(callback_event)
+        edit = await self.click("feed:browse:feed|0")
+        self.assertIn("Requeue me", edit.call_args.args[0])
+
     async def test_rated_card_shows_its_reaction_and_loses_reaction_buttons(self):
         for action, status, kept, removed in (
             ("like", "✅ Нравится", {"feed:want"}, {"feed:like", "feed:skip"}),
-            ("skip", "✖️ Не интересно", set(), {"feed:like", "feed:skip", "feed:want"}),
+            ("skip", "✖️ Не моё", set(), {"feed:like", "feed:skip", "feed:want"}),
         ):
             with self.subTest(action=action):
                 event = await self.event(f"Rated {action}")
@@ -335,13 +470,17 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(removed & left)
                 self.assertIn("Подробнее", str(edit.call_args.kwargs["attachments"]))
 
-    async def test_unexpected_callback_error_is_acknowledged(self):
+    async def test_unexpected_callback_error_offers_retry_and_menu(self):
         callback_event = callback("feed:browse:feed|0", 100)
         handler = await select_handler(self.dispatcher, callback_event)
+        callback_event.bot = SimpleNamespace(me=None, send_message=AsyncMock())
         with patch("bot.feed.FeedBufferStore.pop", new=AsyncMock(side_effect=RuntimeError("redis down"))), \
              patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
             await handler(callback_event)
-        ack.assert_awaited_once_with("Что-то пошло не так. Попробуй ещё раз")
+        ack.assert_awaited_once_with()
+        sent = callback_event.bot.send_message.await_args
+        self.assertEqual(sent.kwargs["text"], ERROR_TEXT)
+        self.assertEqual(payloads(sent.kwargs["attachments"]), ["feed:browse:feed|0", MENU_PAYLOAD])
 
     async def test_free_text_after_onboarding_shows_menu_not_profile(self):
         event_message = message("Хуй", 100)
@@ -364,7 +503,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         handler = await select_handler(self.dispatcher, event_message)
         with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
             await handler(event_message)
-        self.assertIn("Сейчас MVP работает только в Москве", answer.call_args.args[0])
+        self.assertIn("На этапе MVP ДвижМАКС работает в Москве", answer.call_args.args[0])
         self.assertIn(f"onboarding:city:{self.city.id}", payloads(answer.call_args.kwargs["attachments"]))
         async with self.factory() as session:
             self.assertIsNone((await session.get(User, guest.id)).city_id)
@@ -379,10 +518,11 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
         event_callback = callback(f"feed:company:yes|{a.plan_id}|plans|0", 100)
         handler = await select_handler(self.dispatcher, event_callback)
+        event_callback.bot = SimpleNamespace(me=None, send_message=AsyncMock())
         with patch.object(MessageCallback, "edit", new_callable=AsyncMock, side_effect=RuntimeError("MAX unavailable")), \
-             patch.object(MessageCallback, "ack", new_callable=AsyncMock) as ack:
+             patch.object(MessageCallback, "ack", new_callable=AsyncMock):
             await handler(event_callback)
-        ack.assert_awaited_once_with("Что-то пошло не так. Попробуй ещё раз")
+        self.assertEqual(event_callback.bot.send_message.await_args.kwargs["text"], ERROR_TEXT)
         async with self.factory() as session:
             self.assertIsNone(await session.get(CompanionView, (self.user.id, event.id, self.other.id)))
         await self.click(f"feed:company:yes|{a.plan_id}|plans|0")

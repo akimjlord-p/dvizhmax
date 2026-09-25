@@ -21,6 +21,7 @@ from infrastructure.db.social_models import (
     EventPlan,
     EventReaction,
     Match,
+    MatchContact,
     Notification,
     NotificationInterest,
 )
@@ -56,6 +57,9 @@ async def reset_demo_event() -> dict[str, int]:
             await session.execute(delete(Notification).where(Notification.event_id == DEMO_EVENT_ID))
             await session.execute(delete(CompanionView).where(CompanionView.event_id == DEMO_EVENT_ID))
             await session.execute(delete(CompanionInterest).where(CompanionInterest.event_id == DEMO_EVENT_ID))
+            await session.execute(delete(MatchContact).where(
+                MatchContact.match_id.in_(select(Match.id).where(Match.event_id == DEMO_EVENT_ID))
+            ))
             await session.execute(delete(Match).where(Match.event_id == DEMO_EVENT_ID))
             await session.execute(delete(EventReaction).where(EventReaction.event_id == DEMO_EVENT_ID))
             await session.execute(delete(EventPlan).where(EventPlan.event_id == DEMO_EVENT_ID))

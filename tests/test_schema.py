@@ -80,7 +80,7 @@ class SchemaTests(unittest.TestCase):
             module.op = recorder
             module.upgrade()
         self.assertEqual(ddl(recorder.metadata), ddl(Base.metadata))
-        self.assertEqual(len(recorder.metadata.tables), 20)
+        self.assertEqual(len(recorder.metadata.tables), 21)
 
     def test_upgrade_and_social_downgrade_sql(self):
         output = StringIO()

@@ -13,7 +13,8 @@ except ImportError:  # pragma: no cover - dependency is installed in production
     redis = None
 
 
-BUFFER_TTL_SECONDS = 60 * 60
+# Cards shown without a reaction stay excluded from the feed for a day.
+BUFFER_TTL_SECONDS = 24 * 60 * 60
 
 
 @dataclass(slots=True)
@@ -59,6 +60,21 @@ class FeedBufferStore:
             event_id = state.queue.pop(0)
             state.shown.add(event_id)
             return event_id
+
+    async def requeue(self, user_id: UUID, event_id: UUID) -> None:
+        """Return a card that could not be delivered to the front of the queue."""
+        if self._redis is not None:
+            await asyncio.gather(
+                self._redis.lpush(self._key(user_id, "queue"), str(event_id)),
+                self._redis.srem(self._key(user_id, "shown"), str(event_id)),
+            )
+            await self._touch(user_id)
+            return
+        async with self._locks[user_id]:
+            state = self._memory.setdefault(user_id, _MemoryState())
+            state.shown.discard(event_id)
+            if event_id not in state.queue:
+                state.queue.insert(0, event_id)
 
     async def append(self, user_id: UUID, event_ids: list[UUID]) -> None:
         if not event_ids:

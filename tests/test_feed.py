@@ -189,7 +189,7 @@ class FeedRecommendationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Long <event> description", card_text(event))
         buttons = _buttons(event, mode="feed")[0].payload.buttons
         link = next(button for row in buttons for button in row if isinstance(button, LinkButton))
-        self.assertEqual((link.text, link.url), ("Подробнее", event.source_url))
+        self.assertEqual((link.text, link.url), ("Подробнее ↗", event.source_url))
 
 if __name__ == "__main__":
     unittest.main()

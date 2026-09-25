@@ -18,6 +18,7 @@ from infrastructure.db.social_models import (
     EventPlan,
     EventReaction,
     Match,
+    MatchContact,
     Notification,
     NotificationInterest,
     User,
@@ -54,6 +55,7 @@ async def reset_registered_profiles() -> int:
             await session.execute(delete(Notification))
             await session.execute(delete(CompanionView))
             await session.execute(delete(CompanionInterest))
+            await session.execute(delete(MatchContact))
             await session.execute(delete(Match))
             await session.execute(delete(UserBlock))
 

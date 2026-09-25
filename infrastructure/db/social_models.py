@@ -161,6 +161,25 @@ class Match(UUIDPrimaryKey, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class MatchContact(UUIDPrimaryKey, Timestamps, Base):
+    """A contact one match participant voluntarily shares with the other."""
+
+    __tablename__ = "match_contacts"
+    __table_args__ = (
+        UniqueConstraint("match_id", "sender_id"),
+        CheckConstraint("status IN ('awaiting', 'confirming', 'sent', 'cancelled')", name="status"),
+        Index("uq_match_contacts_pending_sender", "sender_id", unique=True,
+              postgresql_where=text("status IN ('awaiting', 'confirming')")),
+    )
+
+    match_id: Mapped[UUID] = mapped_column(ForeignKey("matches.id"))
+    sender_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(String(20), server_default="awaiting")
+    contact_text: Mapped[str | None] = mapped_column(Text)
+    contact_attachment: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class UserBlock(Base):
     __tablename__ = "user_blocks"
     __table_args__ = (CheckConstraint("blocker_id != blocked_id", name="not_self"),)

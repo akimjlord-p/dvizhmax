@@ -6,50 +6,51 @@ import logging
 from uuid import UUID
 
 from maxapi import Bot
-from maxapi.enums import TextFormat
 from maxapi.types import ButtonsPayload, CallbackButton
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.repositories.demo import DEMO_MAX_USER_IDS
 from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients, NotificationRepository
-from .navigation import menu, menu_rows
+from .navigation import menu_rows
 
 
 LOGGER = logging.getLogger(__name__)
 INTEREST_DIGEST_INTERVAL_SECONDS = 60
-DEMO_PROFILE_URL = "https://max.ru/t110_hakaton_max_bot"
+def _people(count: int) -> str:
+    """Russian agreement: 1 человек хочет, 2 человека хотят, 5 человек хотят."""
+    if count % 10 == 1 and count % 100 != 11:
+        return f"хочет пойти {count} человек"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return f"хотят пойти {count} человека"
+    return f"хотят пойти {count} человек"
 
 
-def _escape_markdown(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)")
-
-
-def _profile_link(max_user_id: int) -> str:
-    # The demo companion has no real MAX account. Link it to the project bot
-    # so the demo still contains a visible, working MAX link.
-    return DEMO_PROFILE_URL if max_user_id in DEMO_MAX_USER_IDS else f"max://user/{max_user_id}"
-
-
-def match_message(*, event_title: str, peer_name: str, peer_max_user_id: int) -> str:
+def match_message(*, event_title: str, peer_name: str) -> str:
     return (
-        f"У вас мэтч на событие «{_escape_markdown(event_title)}»!\n\n"
-        f"Профиль: [{_escape_markdown(peer_name)}]({_profile_link(peer_max_user_id)})"
+        "Есть мэтч 🎉\n\n"
+        f"Вы оба хотите пойти на «{event_title}» вместе.\n\n"
+        f"Твоя компания: {peer_name}"
     )
 
 
+def match_attachments(match_id: UUID) -> list:
+    return [ButtonsPayload(buttons=[
+        [CallbackButton(text="Поделиться контактом", payload=f"contact:share:{match_id}")],
+        [CallbackButton(text="Пока не сейчас", payload=f"contact:later:{match_id}")],
+    ] + menu_rows()).pack()]
+
+
 def interest_digest_message(digest: InterestDigest) -> str:
-    count = len(digest.interest_ids)
-    noun = "человек хочет" if count == 1 else "человека хотят" if 2 <= count <= 4 else "человек хотят"
     return (
-        f"На событие «{digest.event_title}» с тобой {count} {noun} пойти.\n\n"
-        "Нажми «Посмотреть», чтобы увидеть, кто это, и ответить."
+        f"На «{digest.event_title}» с тобой {_people(len(digest.interest_ids))}. "
+        "Посмотри анкеты и реши, с кем хочешь пойти."
     )
 
 
 def interest_digest_attachments(digest: InterestDigest) -> list:
     rows = menu_rows()
     if digest.recipient_plan_id is not None:
-        rows = [[CallbackButton(text="Посмотреть", payload=f"feed:likers:{digest.recipient_plan_id}")]] + rows
+        rows = [[CallbackButton(text="Посмотреть анкеты", payload=f"feed:likers:{digest.recipient_plan_id}")]] + rows
     return [ButtonsPayload(buttons=rows).pack()]
 
 
@@ -62,36 +63,23 @@ async def send_match_notifications(
         recipients = await NotificationRepository(session).match_recipients(match_id)
     if recipients is None:
         return
-    await _send_match_messages(bot, recipients)
+    await _send_match_messages(bot, recipients, match_id)
 
 
-async def _send_match_messages(bot: Bot, recipients: MatchRecipients) -> None:
+async def _send_match_messages(bot: Bot, recipients: MatchRecipients, match_id: UUID) -> None:
     messages = []
     if recipients.first_max_user_id not in DEMO_MAX_USER_IDS:
         messages.append((
             recipients.first_max_user_id,
-            match_message(
-                event_title=recipients.event_title,
-                peer_name=recipients.second_name,
-                peer_max_user_id=recipients.second_max_user_id,
-            ),
+            match_message(event_title=recipients.event_title, peer_name=recipients.second_name),
         ))
     if recipients.second_max_user_id not in DEMO_MAX_USER_IDS:
         messages.append((
             recipients.second_max_user_id,
-            match_message(
-                event_title=recipients.event_title,
-                peer_name=recipients.first_name,
-                peer_max_user_id=recipients.first_max_user_id,
-            ),
+            match_message(event_title=recipients.event_title, peer_name=recipients.first_name),
         ))
     results = await asyncio.gather(*(
-        bot.send_message(
-            user_id=user_id,
-            text=text,
-            format=TextFormat.MARKDOWN,
-            attachments=menu(),
-        )
+        bot.send_message(user_id=user_id, text=text, attachments=match_attachments(match_id))
         for user_id, text in messages
     ), return_exceptions=True)
     for (recipient_max_user_id, _), result in zip(messages, results, strict=True):

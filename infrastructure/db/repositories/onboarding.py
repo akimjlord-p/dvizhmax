@@ -132,7 +132,7 @@ class OnboardingRepository:
 
     async def set_age(self, user_id: UUID, value: int) -> None:
         if not 18 <= value <= 120:
-            raise OnboardingError("ДвижМАКС работает для пользователей от 18 лет. Укажи возраст от 18 до 120")
+            raise OnboardingError("Поиск компании доступен только с 18 лет. Укажи возраст от 18 до 120")
         user = await self._require_step(user_id, "age")
         user.age = value
         self._advance(user, "description")

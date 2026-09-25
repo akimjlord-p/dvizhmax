@@ -183,11 +183,11 @@ class FeedRepository:
     async def record_reaction(self, user_id: UUID, event_id: UUID, reaction: str) -> bool:
         """Record an event reaction once and report whether this callback changed state."""
         if reaction not in {"like", "skip"}:
-            raise OnboardingError("Unsupported event reaction")
+            raise OnboardingError("Неизвестная реакция")
         user = await self._lock_user(user_id)
         event = await self.session.get(Event, event_id)
         if event is None or event.city_id != user.city_id:
-            raise OnboardingError("This event is unavailable")
+            raise OnboardingError("Это событие больше недоступно")
         inserted = await self.session.scalar(
             insert(EventReaction)
             .values(user_id=user.id, event_id=event_id, reaction=reaction)
@@ -206,7 +206,7 @@ class FeedRepository:
         event = await self.session.get(Event, event_id)
         reaction = await self.session.get(EventReaction, (user.id, event_id))
         if event is None or (event.city_id != user.city_id and (reaction is None or reaction.reaction != "like")):
-            raise OnboardingError("This event is unavailable")
+            raise OnboardingError("Это событие больше недоступно")
         existing = await self.session.scalar(
             select(EventPlan).where(EventPlan.user_id == user.id, EventPlan.event_id == event_id)
         )
@@ -218,7 +218,7 @@ class FeedRepository:
         if reaction is None:
             self.session.add(EventReaction(user_id=user.id, event_id=event_id, reaction="like"))
         elif reaction.reaction != "like":
-            raise OnboardingError("This event is unavailable for plans")
+            raise OnboardingError("Это событие отмечено как «Не моё». Выбери другое в афише")
         plan = existing or EventPlan(user_id=user.id, event_id=event_id)
         plan.status = "planned"
         plan.company_status = "not_looking"
@@ -268,10 +268,10 @@ class FeedRepository:
     async def set_company_search(self, user_id: UUID, plan_id: UUID, *, looking: bool) -> None:
         user = await self._lock_user(user_id)
         if looking and user.profile_status != "active":
-            raise OnboardingError("Complete your profile before searching for company")
+            raise OnboardingError("Для поиска компании сначала заполни анкету")
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id or plan.status != "planned":
-            raise OnboardingError("Plan is unavailable")
+            raise OnboardingError("Этот план уже неактуален")
         plan.company_status = "looking" if looking else "not_looking"
 
     async def save_image_attachment(self, image_id: UUID, attachment: dict[str, Any]) -> None:
@@ -477,14 +477,14 @@ class FeedRepository:
     async def _require_user(self, user_id: UUID) -> User:
         user = await self.session.get(User, user_id)
         if user is None:
-            raise OnboardingError("User not found")
+            raise OnboardingError("Сначала пройди /start")
         return user
 
     async def _lock_user(self, user_id: UUID) -> User:
         """Serialize state-changing callbacks for one user until the transaction commits."""
         user = await self.session.scalar(select(User).where(User.id == user_id).with_for_update())
         if user is None:
-            raise OnboardingError("User not found")
+            raise OnboardingError("Сначала пройди /start")
         return user
 
 

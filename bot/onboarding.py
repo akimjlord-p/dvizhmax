@@ -14,11 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.models import City, Tag
 from infrastructure.db.repositories import OnboardingError, OnboardingRepository
-from .navigation import menu, menu_rows, profile_offer
+from .contacts import handle_contact_message
+from .navigation import menu, menu_rows, profile_offer, report_error
 
 LOGGER = logging.getLogger(__name__)
 CONSENT_VERSION = "2026-09-20"
 MIN_INTERESTS = 3
+FREE_TEXT_NOTICE = "Сейчас здесь нужно выбрать действие кнопкой ниже."
 MVP_CITY_NAME = "Москва"
 GROUPS = (
     ("music_stage", "Музыка и сцена", frozenset({"concert", "theater", "cinema", "standup", "party", "dance", "festival"})),
@@ -106,9 +108,8 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             repo = OnboardingRepository(session)
             tags, selected = await repo.list_interest_tags(), await repo.selected_interest_ids(uid)
         text = (
-            "Какие занятия тебе интересны?\n\n"
-            "Открой раздел и выбери сколько угодно интересов. "
-            f"Сейчас выбрано: {len(selected)}. Для старта нужно хотя бы {MIN_INTERESTS}."
+            f"Выбери минимум {MIN_INTERESTS} интереса. Они помогут персонализировать афишу.\n\n"
+            f"Выбрано: {len(selected)}."
         )
         await answer(
             f"{notice}\n\n{text}" if notice else text,
@@ -171,33 +172,31 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
         if not consent:
             await answer(
                 with_notice(
-                    "ДвижМАКС помогает найти событие и компанию для него.\n\n"
-                "Мы сохраняем твой MAX ID, город, выбранные интересы и данные анкеты, если ты решишь её создать. "
-                "Это нужно для рекомендаций, поиска компании и общения.\n\n"
-                    "Продолжая, ты соглашаешься на обработку этих данных."
+                    "ДвижМАКС помогает выбрать событие и найти компанию для совместного похода.\n\n"
+                    "Для рекомендаций мы сохраняем MAX ID, город и интересы. Если создашь анкету — "
+                    "также имя, возраст, пол, описание и фото.\n\n"
+                    "Нажимая «Согласен», ты разрешаешь использовать эти данные для работы сервиса."
                 ),
                 attachments=keyboard([[CallbackButton(text="Согласен", payload="onboarding:consent:accept")], [CallbackButton(text="Не согласен", payload="onboarding:consent:decline")]]),
             )
         elif user.city_id is None or step == "city":
             await prompt(
-                (
-                    "Выбери Москву кнопкой ниже."
-                    if notice else "Сейчас MVP работает только в Москве. Выбери город кнопкой ниже."
-                ) if cities else "Каталог мероприятий ещё обновляется. Попробуй чуть позже.",
-                [[CallbackButton(text=city.name, payload=f"onboarding:city:{city.id}")] for city in cities],
+                "На этапе MVP ДвижМАКС работает в Москве."
+                if cities else "Каталог мероприятий ещё обновляется. Попробуй чуть позже.",
+                [[CallbackButton(text="Продолжить с Москвой", payload=f"onboarding:city:{city.id}")] for city in cities],
             )
         elif step == "profile_choice":
-            await answer(with_notice("Город сохранён.\n\nХочешь создать профиль? С профилем можно искать компанию на мероприятия. Без него доступна только афиша."), attachments=keyboard([[CallbackButton(text="Создать профиль", payload="onboarding:profile:create")], [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")]]))
+            await answer(with_notice("Хочешь искать компанию на события?\n\nС профилем можно видеть людей, которые тоже собираются пойти. Без профиля доступна афиша."), attachments=keyboard([[CallbackButton(text="Создать профиль", payload="onboarding:profile:create")], [CallbackButton(text="Только афиша", payload="onboarding:profile:guest")]]))
         elif step == "name":
             await prompt("Как тебя зовут? Это имя увидят другие люди.")
         elif step == "gender":
             await prompt("Выбери пол.", [[CallbackButton(text="Мужской", payload="onboarding:gender:male")], [CallbackButton(text="Женский", payload="onboarding:gender:female")]])
         elif step == "age":
-            await prompt("Сколько тебе лет? ДвижМАКС работает для пользователей от 18 лет.")
+            await prompt("Сколько тебе лет?\n\nПоиск компании доступен только пользователям 18+.")
         elif step == "description":
-            await prompt("Расскажи о себе в паре фраз. Это увидят люди, которые ищут компанию.", [[CallbackButton(text="Очистить описание" if editing else "Пропустить", payload="onboarding:description:skip")]])
+            await prompt("Расскажи о себе в 1–2 фразах. Это помогает понять, будет ли комфортно пойти вместе.", [[CallbackButton(text="Очистить описание" if editing else "Пропустить", payload="onboarding:description:skip")]])
         elif step == "photo":
-            await prompt("Прикрепи новое фото для анкеты." if editing else "Добавь фото для анкеты — так тебя будет проще узнать. Его можно пропустить.", [[CallbackButton(text="Удалить фото" if editing else "Пропустить", payload="onboarding:photo:skip")]])
+            await prompt("Прикрепи новое фото для анкеты." if editing else "Добавь фото — так тебя будет проще узнать перед встречей.", [[CallbackButton(text="Удалить фото" if editing else "Пропустить", payload="onboarding:photo:skip")]])
         elif step == "interests":
             await interest_categories(answer, uid, notice=notice)
         elif step == "complete":
@@ -247,9 +246,9 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 return
             if action == "consent" and value == "decline":
                 await event.edit(
-                    "Без согласия бот не может создать профиль и подобрать мероприятия.",
+                    "Без согласия мы не можем персонализировать афишу и создать профиль.",
                     attachments=keyboard([[
-                        CallbackButton(text="Начать заново", payload="onboarding:resume:current"),
+                        CallbackButton(text="Вернуться к согласию", payload="onboarding:resume:current"),
                     ]]),
                 )
                 return
@@ -267,7 +266,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 async with session_factory() as session:
                     city = await session.get(City, UUID(value))
                     if city is None or city.name != MVP_CITY_NAME:
-                        raise OnboardingError("Сейчас MVP работает только в Москве")
+                        raise OnboardingError("На этапе MVP ДвижМАКС работает в Москве")
                     await OnboardingRepository(session).choose_city(uid, city.id)
                     await session.commit()
                 await resume(event, event.edit)
@@ -337,7 +336,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             await event.ack(str(exc))
         except Exception:
             LOGGER.exception("Onboarding callback %r failed", event.callback.payload)
-            await event.ack("Что-то пошло не так. Попробуй ещё раз")
+            await report_error(event, event.callback.payload, answered=False)
 
     @dispatcher.message_created(~F.message.body.text.regexp(r"^\s*/"))
     async def on_message(event: MessageCreated) -> None:
@@ -345,6 +344,8 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
         if sender is None or (event.message.body.text or "").strip().startswith("/"):
             return
         uid = await user_id(sender.user_id, sender.username)
+        if await handle_contact_message(event, uid, session_factory):
+            return
         text = (event.message.body.text or "").strip()
         unexpected_step: str | None = None
         async with session_factory() as session:
@@ -355,7 +356,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                     await repo.set_name(uid, text)
                 elif step == "age":
                     if not text.isdecimal():
-                        raise OnboardingError("Укажи возраст числом от 14 до 120")
+                        raise OnboardingError("Укажи возраст числом от 18 до 120")
                     await repo.set_age(uid, int(text))
                 elif step == "description":
                     await repo.set_description(uid, text)
@@ -368,10 +369,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 elif step == "complete" and await repo.has_consent(uid, consent_version):
                     # Free text after onboarding is not a command: point to the menu
                     # instead of reopening the profile.
-                    await event.message.answer(
-                        "Я понимаю только кнопки и команды. Выбери раздел ниже.",
-                        attachments=menu(),
-                    )
+                    await event.message.answer(FREE_TEXT_NOTICE, attachments=menu())
                     return
                 else:
                     unexpected_step = step
@@ -382,7 +380,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 await event.message.answer(str(exc))
                 return
         if unexpected_step is not None:
-            notice = "Сейчас MVP работает только в Москве." if unexpected_step == "city" else "Выбери действие кнопкой ниже."
+            notice = "На этапе MVP ДвижМАКС работает в Москве." if unexpected_step == "city" else FREE_TEXT_NOTICE
             await resume(event, event.message.answer, notice=notice)
             return
         await resume(event, event.message.answer)

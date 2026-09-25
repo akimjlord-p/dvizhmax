@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.enums import UpdateType
 
+from bot.contacts import register_contact_handlers
 from bot.feed import register_feed_handlers
 from bot.notifications import run_interest_digest_loop
 from bot.onboarding import register_onboarding_handlers
@@ -39,6 +40,7 @@ async def main() -> None:
     session_factory = create_session_factory(engine)
     register_onboarding_handlers(dispatcher, session_factory)
     register_feed_handlers(dispatcher, session_factory)
+    register_contact_handlers(dispatcher, session_factory)
     interest_digest_task = asyncio.create_task(
         run_interest_digest_loop(bot, session_factory),
         name="interest-digest",

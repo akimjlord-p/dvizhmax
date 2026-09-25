@@ -176,7 +176,7 @@ class CompanionRepository:
     async def react(self, user_id: UUID, candidate_plan_id: UUID, *, liked: bool) -> CompanionReactionResult:
         candidate_plan = await self.session.get(EventPlan, candidate_plan_id)
         if candidate_plan is None:
-            raise OnboardingError("Companion is unavailable")
+            raise OnboardingError("Эта анкета уже недоступна: человек отменил поход или перестал искать компанию")
         owner_plan_id = await self.session.scalar(
             select(EventPlan.id).where(
                 EventPlan.user_id == user_id,
@@ -186,7 +186,7 @@ class CompanionRepository:
             )
         )
         if owner_plan_id is None or owner_plan_id == candidate_plan.id:
-            raise OnboardingError("Company search is unavailable")
+            raise OnboardingError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
 
         # Both reciprocal callbacks lock this same pair in one deterministic order.
         # The second transaction therefore sees the first interest and creates the match.
@@ -201,7 +201,7 @@ class CompanionRepository:
             ).all()
         )
         if len(locked_plans) != 2:
-            raise OnboardingError("Company search is unavailable")
+            raise OnboardingError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
         plans_by_id = {plan.id: plan for plan in locked_plans}
         owner_plan = plans_by_id[owner_plan_id]
         candidate_plan = plans_by_id[candidate_plan.id]
@@ -211,7 +211,7 @@ class CompanionRepository:
             or candidate_plan.status != "planned"
             or candidate_plan.company_status != "looking"
         ):
-            raise OnboardingError("Companion is unavailable")
+            raise OnboardingError("Эта анкета уже недоступна: человек отменил поход или перестал искать компанию")
 
         view = await self.session.scalar(
             select(CompanionView)
@@ -335,5 +335,5 @@ class CompanionRepository:
     async def _own_looking_plan(self, user_id: UUID, plan_id: UUID) -> EventPlan:
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id or plan.status != "planned" or plan.company_status != "looking":
-            raise OnboardingError("Company search is unavailable")
+            raise OnboardingError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
         return plan
