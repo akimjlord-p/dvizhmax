@@ -1,0 +1,12 @@
+# Caddy gets a Let's Encrypt certificate for DOMAIN, renews it and redirects
+# HTTP to HTTPS on its own. Values come from docker-compose.webhook.yml.
+{$DOMAIN} {
+	# MAX delivers updates here; the bot checks X-Max-Bot-Api-Secret itself.
+	handle {$MAX_WEBHOOK_PATH} {
+		reverse_proxy bot:{$MAX_WEBHOOK_PORT}
+	}
+
+	handle {
+		respond 404
+	}
+}

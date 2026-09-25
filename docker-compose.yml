@@ -1,10 +1,30 @@
+# Base stack. `docker compose up -d --build` builds the app image once, applies
+# migrations and (re)starts the bot and the catalog worker.
+# Delivery mode is chosen by .env (MAX_TRANSPORT) or an override file:
+#   docker-compose.polling.yml — long polling, no domain needed
+#   docker-compose.webhook.yml — webhook behind Caddy with automatic HTTPS
+# Without an override the bot publishes 127.0.0.1:8080 for nginx on the host.
+
+# Every app service runs the same image. Only the bot builds it: several builds of
+# one tag in parallel conflict. The others never pull it from a registry.
+x-app: &app
+  image: dvizhmax-app:${IMAGE_TAG:-latest}
+  pull_policy: never
+  env_file: .env
+
+x-after-migrate: &after-migrate
+  postgres:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
 services:
   postgres:
     image: postgres:17-alpine
     environment:
       POSTGRES_DB: dvizhmax
       POSTGRES_USER: dvizhmax
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -27,83 +47,50 @@ services:
     restart: unless-stopped
 
   migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile.bot
+    <<: *app
     command: ["python", "-m", "alembic", "upgrade", "head"]
-    env_file: .env
     depends_on:
       postgres:
         condition: service_healthy
     restart: "no"
 
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile.bot
-    env_file: .env
+    <<: *app
+    build: .
+    pull_policy: build
+    command: ["python", "-m", "bot.main"]
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
+      <<: *after-migrate
       redis:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     restart: unless-stopped
 
   catalog-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.catalog-worker
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    <<: *app
+    command: ["python", "-m", "workers.catalog_worker"]
+    depends_on: *after-migrate
     restart: unless-stopped
 
   demo-seed:
-    build:
-      context: .
-      dockerfile: Dockerfile.catalog-worker
+    <<: *app
     command: ["python", "-m", "workers.demo_seed"]
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    depends_on: *after-migrate
     profiles: ["tools"]
     restart: "no"
 
   demo-reset:
-    build:
-      context: .
-      dockerfile: Dockerfile.catalog-worker
+    <<: *app
     command: ["python", "-m", "workers.reset_demo"]
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    depends_on: *after-migrate
     profiles: ["tools"]
     restart: "no"
 
   profile-reset:
-    build:
-      context: .
-      dockerfile: Dockerfile.catalog-worker
+    <<: *app
     command: ["python", "-m", "workers.reset_profiles"]
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    depends_on: *after-migrate
     profiles: ["tools"]
     restart: "no"
 

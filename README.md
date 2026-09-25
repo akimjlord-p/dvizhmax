@@ -108,37 +108,23 @@ docs/                    Схема данных, пользовательски
 
 ## Запуск, остановка, перезапуск
 
-Пошаговая инструкция для трёх вариантов — long polling, webhook с nginx и Let's Encrypt
-в Docker, webhook с nginx на хосте — в [docs/deploy.md](docs/deploy.md). Ниже — команды
-для текущего прода (вариант с nginx на хосте).
+Все процессы работают из одного Docker-образа. Пошаговая инструкция для трёх вариантов —
+long polling, webhook с Caddy (HTTPS автоматически), webhook с nginx на хосте — в
+[docs/deploy.md](docs/deploy.md). Команды для текущего прода (nginx на хосте):
 
 ```bash
-docker compose up -d --build                      # PostgreSQL, Redis, миграции, бот, catalog-worker
-docker compose ps                                 # статус
-docker compose logs -f bot                        # логи бота
-docker compose restart bot                        # перезапуск бота
-docker compose down                               # остановка; данные остаются в volumes
-```
-
-Первый импорт каталога запускается сразу после старта catalog-worker. Демо-данные и сброс:
-
-```bash
-docker compose --profile tools run --rm demo-seed      # создать демо-событие и анкеты
-docker compose --profile tools run --rm demo-reset     # сбросить лайки, мэтчи, контакты на демо-событии
+docker compose up -d --build                           # сборка, миграции, бот, catalog-worker
+docker compose ps                                      # статус
+docker compose logs -f bot                             # логи бота
+docker compose restart bot                             # перезапуск бота
+docker compose down                                    # остановка; данные остаются в томах
+docker compose --profile tools run --rm demo-seed      # демо-событие и демо-анкеты
+docker compose --profile tools run --rm demo-reset     # сбросить лайки, мэтчи и контакты на демо-событии
 docker compose --profile tools run --rm profile-reset  # удалить все реальные профили
 ```
 
-Обновление кода на сервере:
-
-```bash
-git pull --ff-only
-docker compose build bot catalog-worker migrate
-docker compose --profile tools build               # образы demo-seed, demo-reset, profile-reset
-docker compose run --rm migrate                    # у migrate свой образ: без build выше он возьмёт старые миграции
-docker compose up -d --no-deps --force-recreate bot catalog-worker
-```
-
-Бот слушает только `127.0.0.1:8080`; Nginx проксирует `/max/webhook` на этот адрес.
+Обновление кода — `git pull --ff-only && docker compose up -d --build`. Бот слушает только
+`127.0.0.1:8080`, nginx хоста проксирует на него `/max/webhook`.
 
 ## Разработка
 

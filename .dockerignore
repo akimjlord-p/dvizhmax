@@ -4,5 +4,12 @@
 __pycache__
 *.py[cod]
 .env
+.env.*
+!.env.example
+.postgres-data
+.runtime-logs
 tests
 docs
+deploy
+*.md
+*.xlsx

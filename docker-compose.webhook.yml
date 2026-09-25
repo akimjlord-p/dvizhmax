@@ -1,8 +1,7 @@
-# Webhook with nginx and Let's Encrypt in containers, for a server without its own nginx.
-#   ./deploy/init-letsencrypt.sh          # once: obtains the certificate and starts everything
+# Webhook behind Caddy, which obtains and renews the HTTPS certificate by itself.
 #   docker compose -f docker-compose.yml -f docker-compose.webhook.yml up -d --build
-# Needs DOMAIN and LETSENCRYPT_EMAIL in .env, DNS A record of DOMAIN pointing to the
-# server, and free ports 80 and 443.
+# Needs DOMAIN in .env, a DNS A record of DOMAIN
+# pointing to the server, and free ports 80 and 443.
 services:
   bot:
     environment:
@@ -10,8 +9,8 @@ services:
       MAX_WEBHOOK_URL: https://${DOMAIN:?Set DOMAIN in .env}${MAX_WEBHOOK_PATH:-/max/webhook}
     ports: !reset []
 
-  nginx:
-    image: nginx:1.27-alpine
+  caddy:
+    image: caddy:2.8-alpine
     environment:
       DOMAIN: ${DOMAIN}
       MAX_WEBHOOK_PATH: ${MAX_WEBHOOK_PATH:-/max/webhook}
@@ -20,23 +19,13 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./deploy/nginx/templates:/etc/nginx/templates:ro
-      - letsencrypt:/etc/letsencrypt
-      - certbot_webroot:/var/www/certbot
-    # Reload every 6 hours to pick up renewed certificates.
-    command: ["/bin/sh", "-c", "while :; do sleep 6h & wait $${!}; nginx -s reload; done & exec /docker-entrypoint.sh nginx -g 'daemon off;'"]
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
       - bot
     restart: unless-stopped
 
-  certbot:
-    image: certbot/certbot:v2.11.0
-    volumes:
-      - letsencrypt:/etc/letsencrypt
-      - certbot_webroot:/var/www/certbot
-    entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
-    restart: unless-stopped
-
 volumes:
-  letsencrypt:
-  certbot_webroot:
+  caddy_data:
+  caddy_config:
