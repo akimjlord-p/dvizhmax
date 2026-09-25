@@ -6,11 +6,14 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import City, Tag
-from ..social_models import User, UserConsent, UserTagWeight
+from ..social_models import (
+    CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact,
+    Notification, NotificationInterest, User, UserBlock, UserConsent, UserTagWeight,
+)
 
 
 class OnboardingError(ValueError):
@@ -218,6 +221,39 @@ class OnboardingRepository:
             raise OnboardingError("Анкета заполнена не полностью")
         user.profile_status = "active"
         user.onboarding_step = "complete"
+
+    async def delete_account(self, user_id: UUID) -> None:
+        """Remove the user and everything linked to them; this cannot be undone."""
+        plan_ids = select(EventPlan.id).where(EventPlan.user_id == user_id)
+        match_ids = select(Match.id).where(or_(Match.first_user_id == user_id, Match.second_user_id == user_id))
+        interest_ids = select(CompanionInterest.id).where(or_(
+            CompanionInterest.sender_plan_id.in_(plan_ids),
+            CompanionInterest.recipient_plan_id.in_(plan_ids),
+        ))
+        notification_ids = select(Notification.id).where(or_(
+            Notification.recipient_id == user_id,
+            Notification.match_id.in_(match_ids),
+        ))
+        # Children before parents: every row below references a plan, match or the user.
+        for statement in (
+            delete(NotificationInterest).where(or_(
+                NotificationInterest.companion_interest_id.in_(interest_ids),
+                NotificationInterest.notification_id.in_(notification_ids),
+            )),
+            delete(Notification).where(Notification.id.in_(notification_ids)),
+            delete(MatchContact).where(or_(MatchContact.match_id.in_(match_ids), MatchContact.sender_id == user_id)),
+            delete(Match).where(Match.id.in_(match_ids)),
+            delete(CompanionInterest).where(CompanionInterest.id.in_(interest_ids)),
+            delete(CompanionView).where(or_(CompanionView.viewer_id == user_id, CompanionView.shown_user_id == user_id)),
+            delete(UserBlock).where(or_(UserBlock.blocker_id == user_id, UserBlock.blocked_id == user_id)),
+            delete(EventReaction).where(EventReaction.user_id == user_id),
+            delete(UserTagWeight).where(UserTagWeight.user_id == user_id),
+            delete(UserConsent).where(UserConsent.user_id == user_id),
+            delete(EventPlan).where(EventPlan.user_id == user_id),
+            delete(User).where(User.id == user_id),
+        ):
+            await self.session.execute(statement)
+        self.session.expunge_all()
 
     async def require_user(self, user_id: UUID) -> User:
         user = await self.session.get(User, user_id)

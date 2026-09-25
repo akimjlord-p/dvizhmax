@@ -29,6 +29,7 @@ from infrastructure.db.repositories import CompanionRepository, DemoRepository, 
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_MAX_USER_ID
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact, User, UserTagWeight
 from bot.feed import NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
+from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT
 from bot.navigation import ERROR_TEXT, MENU_PAYLOAD
 from test_bot_routing import callback, message, select_handler
 
@@ -352,19 +353,20 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await handler(event)
         return answer
 
-    async def test_match_contact_is_shared_with_the_native_button_after_confirmation(self):
+    async def test_match_contact_is_typed_confirmed_and_delivered(self):
         match_id = await self.matched_pair()
         send, _, _ = await self.press(f"contact:share:{match_id}")
         prompt = send.await_args.kwargs
         self.assertIn("Bob", prompt["text"])
-        keyboard = prompt["attachments"][0].payload.buttons
-        self.assertEqual(str(keyboard[0][0].type), "request_contact")
+        self.assertEqual(payloads(prompt["attachments"]), [f"contact:cancel:{match_id}"])
 
+        # A MAX contact card is not accepted: the phone must be typed on purpose.
         vcf = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+79990001122\nEND:VCARD"
-        answer = await self.send_contact(contact={"vcf_info": vcf, "max_info": {
-            "user_id": 100, "first_name": "Alice", "is_bot": False, "last_activity_time": 0}})
+        answer = await self.send_contact(contact={"vcf_info": vcf})
+        self.assertIn("Отправь ссылку-приглашение MAX", answer.call_args.args[0])
+
+        answer = await self.send_contact(text="https://max.ru/join/alice")
         self.assertIn("Отправить этот контакт пользователю Bob?", answer.call_args.args[0])
-        self.assertIn("+79990001122", answer.call_args.args[0])
         async with self.factory() as session:
             user = await session.get(User, self.user.id)
             self.assertEqual(user.name, "Alice")  # the contact did not leak into the profile
@@ -373,10 +375,8 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         delivered = send.await_args.kwargs
         self.assertEqual(delivered["user_id"], 200)
         self.assertIn("Alice делится контактом", delivered["text"])
-        self.assertIn("+79990001122", delivered["text"])
-        card = delivered["attachments"][0]
-        self.assertEqual(card.model_dump()["payload"]["contact_id"], 100)
-        self.assertIn(f"contact:share:{match_id}", payloads(delivered["attachments"][1:]))
+        self.assertIn("https://max.ru/join/alice", delivered["text"])
+        self.assertIn(f"contact:share:{match_id}", payloads(delivered["attachments"]))
         self.assertIn("Контакт отправлен: Bob", edit.call_args.args[0])
 
         _, _, ack = await self.press(f"contact:confirm:{match_id}")
@@ -384,6 +384,41 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             row = await session.scalar(select(MatchContact).where(MatchContact.match_id == match_id))
             self.assertEqual(row.status, "sent")
+
+    async def test_childrens_events_are_hidden_from_the_feed(self):
+        adult, kids = await self.event("Концерт"), await self.event("Плавание для детей")
+        async with self.factory() as session:
+            cards = await FeedRepository(session).next_cards(self.user.id, limit=10)
+        self.assertEqual([card.id for card in cards], [adult.id])
+        self.assertNotEqual(kids.id, adult.id)
+
+    async def test_company_search_is_not_offered_for_childrens_events(self):
+        event = await self.event("Плавание для детей")
+        edit = await self.click(f"feed:want:{event.id}")
+        self.assertIn(KIDS_COMPANY_TEXT, edit.call_args.args[0])
+        self.assertNotIn("feed:company:yes", " ".join(payloads(edit.call_args.kwargs["attachments"])))
+        async with self.factory() as session:
+            plan = await session.scalar(select(EventPlan).where(EventPlan.user_id == self.user.id))
+            with self.assertRaisesRegex(OnboardingError, KIDS_COMPANY_TEXT):
+                await FeedRepository(session).set_company_search(self.user.id, plan.id, looking=True)
+            [card] = await FeedRepository(session).planned_cards(self.user.id)
+        self.assertTrue(card.for_kids)
+
+    async def test_profile_is_deleted_only_after_confirmation(self):
+        match_id = await self.matched_pair("Before delete")
+        await self.press(f"contact:share:{match_id}")
+        await self.send_contact(text="@alice")
+        send, edit, _ = await self.press("onboarding:delete:ask")
+        self.assertIn("Удалить профиль навсегда?", edit.call_args.args[0])
+        async with self.factory() as session:
+            self.assertIsNotNone(await session.get(User, self.user.id))
+        _, edit, _ = await self.press("onboarding:delete:confirm")
+        self.assertIn("Профиль и все данные удалены", edit.call_args.args[0])
+        async with self.factory() as session:
+            self.assertIsNone(await session.get(User, self.user.id))
+            self.assertIsNone(await session.get(Match, match_id))
+            self.assertEqual((await session.scalars(select(EventPlan).where(EventPlan.user_id == self.user.id))).all(), [])
+            self.assertIsNotNone(await session.get(User, self.other.id))
 
     async def test_cancelled_contact_is_not_sent_and_text_goes_back_to_normal(self):
         match_id = await self.matched_pair("Cancel contact")

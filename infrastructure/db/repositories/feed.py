@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -21,6 +22,14 @@ from .onboarding import OnboardingError
 LIKE_WEIGHT_DELTA = Decimal("0.1")
 WANT_TO_GO_WEIGHT_DELTA = Decimal("0.5")
 SECONDARY_TAG_MULTIPLIER = Decimal("0.4")
+KIDS_COMPANY_TEXT = "Поиск компании недоступен для детских мероприятий"
+_KIDS_TITLE = re.compile(r"для детей|детск|малыш|дошкольн|для школьников|для подростков", re.IGNORECASE)
+
+
+def is_for_kids(title: str, source_payload: dict[str, Any] | None) -> bool:
+    """KudaGo marks children's events with the "kids" category; titles catch the rest."""
+    categories = (source_payload or {}).get("categories") or []
+    return "kids" in categories or bool(_KIDS_TITLE.search(title or ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,12 +58,14 @@ class EventCard:
     company_status: str | None = None
     is_liked: bool = False
     pending_likes: int = 0
+    for_kids: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class WantToGoResult:
     plan_id: UUID
     was_created: bool
+    company_allowed: bool = True
 
 
 class FeedRepository:
@@ -210,8 +221,9 @@ class FeedRepository:
         existing = await self.session.scalar(
             select(EventPlan).where(EventPlan.user_id == user.id, EventPlan.event_id == event_id)
         )
+        company_allowed = not await self._is_for_kids(event)
         if existing is not None and existing.status == "planned":
-            return WantToGoResult(plan_id=existing.id, was_created=False)
+            return WantToGoResult(plan_id=existing.id, was_created=False, company_allowed=company_allowed)
         if existing is not None and existing.status == "completed":
             raise OnboardingError("Этот план уже завершён")
         previous = LIKE_WEIGHT_DELTA if reaction is not None and reaction.reaction == "like" else Decimal("0")
@@ -226,7 +238,7 @@ class FeedRepository:
             self.session.add(plan)
         await self._change_event_tag_weights(user.id, event_id, WANT_TO_GO_WEIGHT_DELTA - previous)
         await self.session.flush()
-        return WantToGoResult(plan_id=plan.id, was_created=True)
+        return WantToGoResult(plan_id=plan.id, was_created=True, company_allowed=company_allowed)
 
     async def remove_like(self, user_id: UUID, event_id: UUID) -> None:
         await self._lock_user(user_id)
@@ -272,7 +284,17 @@ class FeedRepository:
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id or plan.status != "planned":
             raise OnboardingError("Этот план уже неактуален")
+        if looking and await self._is_for_kids(await self.session.get(Event, plan.event_id)):
+            raise OnboardingError(KIDS_COMPANY_TEXT)
         plan.company_status = "looking" if looking else "not_looking"
+
+    async def _is_for_kids(self, event: Event | None) -> bool:
+        if event is None:
+            return False
+        payload = await self.session.scalar(
+            select(EventSource.raw_payload).where(EventSource.event_id == event.id, EventSource.is_primary.is_(True))
+        )
+        return is_for_kids(event.title, payload)
 
     async def save_image_attachment(self, image_id: UUID, attachment: dict[str, Any]) -> None:
         image = await self.session.get(EventImage, image_id)
@@ -342,6 +364,10 @@ class FeedRepository:
             timing = event_timing(event_schedules, now, city.timezone)
             if feed_only and timing is None:
                 continue
+            for_kids = is_for_kids(event.title, source.raw_payload)
+            # The audience is 18+: children's events never reach the feed or the liked list.
+            if feed_only and for_kids:
+                continue
             tagged = tags_by_event.get(event_id, [])
             primary = frozenset(code for code, kind in tagged if kind == "primary")
             if not primary:
@@ -369,6 +395,7 @@ class FeedRepository:
                     tag_codes=frozenset(code for code, _ in tagged),
                     tag_kinds=tuple(tagged),
                     is_liked=event.id in liked_ids,
+                    for_kids=for_kids,
                 )
             )
         cards = [replace(card, score=score_card(card, weights)) for card in cards]

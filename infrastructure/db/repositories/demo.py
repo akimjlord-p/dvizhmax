@@ -24,6 +24,8 @@ class DemoProfile:
     age: int
     description: str
     asset_name: str
+    # Tag codes chosen as interests; None means every onboarding interest.
+    interest_codes: tuple[str, ...] | None = ()
 
 
 DEMO_PROFILES = (
@@ -34,8 +36,9 @@ DEMO_PROFILES = (
         name="Демо Катя",
         gender="female",
         age=24,
-        description="Тестовая анкета для демонстрации мэтча.",
+        description="Тестовая анкета: выбраны все интересы, чтобы показать общие.",
         asset_name="demo-profile-katya.png",
+        interest_codes=None,
     ),
     DemoProfile(
         id=uuid5(NAMESPACE_URL, "dvizhmax:demo:sasha"),
@@ -46,6 +49,7 @@ DEMO_PROFILES = (
         age=26,
         description="Тестовая анкета для демонстрации мэтча.",
         asset_name="demo-profile-sasha.png",
+        interest_codes=("concert", "standup", "quiz"),
     ),
     DemoProfile(
         id=uuid5(NAMESPACE_URL, "dvizhmax:demo:lesha"),
@@ -56,6 +60,7 @@ DEMO_PROFILES = (
         age=23,
         description="Тестовая анкета для демонстрации мэтча.",
         asset_name="demo-profile-lesha.png",
+        interest_codes=("sport", "quest", "board_games"),
     ),
 )
 DEMO_MAX_USER_IDS = frozenset(profile.max_user_id for profile in DEMO_PROFILES)

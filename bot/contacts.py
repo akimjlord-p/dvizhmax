@@ -1,16 +1,15 @@
-"""Voluntary contact exchange after a match: request, confirm, deliver."""
+"""Voluntary contact exchange after a match: the user types a contact, confirms, the bot delivers it.
+
+The contact is always typed by hand. MAX contact cards (request_contact) are not
+used, so a phone number is never passed on without the user writing it.
+"""
 from __future__ import annotations
 
 import logging
-from typing import Any
 from uuid import UUID
 
 from maxapi import Bot, Dispatcher, F
-from maxapi.exceptions.max import MaxApiError
 from maxapi.types import ButtonsPayload, CallbackButton, MessageCallback, MessageCreated
-from maxapi.types.attachments.attachment import ContactAttachmentPayload
-from maxapi.types.attachments.buttons.request_contact import RequestContactButton
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.repositories import ContactRepository, OnboardingError, OnboardingRepository
@@ -20,14 +19,6 @@ from .navigation import menu, menu_rows, report_error
 
 
 LOGGER = logging.getLogger(__name__)
-SHARE_BUTTON_TEXT = "📱 Отправить мой контакт"
-
-
-class _OutgoingContact(BaseModel):
-    """MAX API shape of a contact attachment sent by a bot."""
-
-    type: str = "contact"
-    payload: dict[str, Any]
 
 
 def _share_button(match_id: UUID, text: str = "Поделиться контактом") -> list[CallbackButton]:
@@ -37,14 +28,12 @@ def _share_button(match_id: UUID, text: str = "Поделиться контак
 def request_text(peer: ContactPeer) -> str:
     return (
         f"Отправь ссылку-приглашение MAX или другой контакт, которым готов поделиться с {peer.peer_name}. "
-        "Мы покажем его только после подтверждения.\n\n"
-        f"Проще всего — нажми «{SHARE_BUTTON_TEXT}»."
+        "Мы покажем его только после подтверждения."
     )
 
 
 def request_attachments(match_id: UUID) -> list:
     return [ButtonsPayload(buttons=[
-        [RequestContactButton(text=SHARE_BUTTON_TEXT)],
         [CallbackButton(text="Отмена", payload=f"contact:cancel:{match_id}")],
     ]).pack()]
 
@@ -56,23 +45,10 @@ def confirm_attachments(match_id: UUID) -> list:
     ]).pack()]
 
 
-def contact_from_message(event: MessageCreated) -> tuple[str, dict[str, Any] | None] | None:
-    """Read a shared MAX contact card, or a contact typed as text."""
-    for item in event.message.body.attachments or []:
-        if str(item.type) != "contact" or not isinstance(item.payload, ContactAttachmentPayload):
-            continue
-        vcf = item.payload.vcf
-        owner = item.payload.max_info
-        name = vcf.full_name or (owner.full_name if owner else None)
-        lines = [line for line in (name, f"📞 {vcf.phone}" if vcf.phone else None) if line]
-        if not lines:
-            continue
-        outgoing = {"name": name, "vcf_info": item.payload.vcf_info}
-        if owner is not None:
-            outgoing["contact_id"] = owner.user_id
-        return "\n".join(lines), {key: value for key, value in outgoing.items() if value is not None}
+def contact_from_message(event: MessageCreated) -> str | None:
+    """Only a typed link or contact counts; attached contact cards are ignored."""
     text = (event.message.body.text or "").strip()
-    return (text, None) if text else None
+    return text or None
 
 
 async def handle_contact_message(
@@ -92,7 +68,7 @@ async def handle_contact_message(
             await event.message.answer(request_text(pending.peer), attachments=request_attachments(pending.peer.match_id))
             return True
         try:
-            saved = await repo.set_contact(user_id, contact_text=contact[0], contact_attachment=contact[1])
+            saved = await repo.set_contact(user_id, contact_text=contact, contact_attachment=None)
         except OnboardingError as exc:
             await event.message.answer(str(exc), attachments=request_attachments(pending.peer.match_id))
             return True
@@ -107,20 +83,11 @@ async def handle_contact_message(
 async def _deliver(bot: Bot, sent: SentContact) -> None:
     peer = sent.peer
     rows = [] if sent.peer_has_shared else [_share_button(peer.match_id, "Поделиться своим контактом")]
-    buttons = ButtonsPayload(buttons=rows + menu_rows()).pack()
-    text = f"{peer.sender_name} делится контактом по событию «{peer.event_title}»:\n\n{sent.contact_text}"
-    if sent.contact_attachment:
-        try:
-            await bot.send_message(
-                user_id=peer.peer_max_user_id,
-                text=text,
-                attachments=[_OutgoingContact(payload=sent.contact_attachment), buttons],
-            )
-            return
-        except MaxApiError as exc:
-            # The text already carries the contact; the card is a convenience.
-            LOGGER.warning("MAX rejected a forwarded contact card: %s", exc)
-    await bot.send_message(user_id=peer.peer_max_user_id, text=text, attachments=[buttons])
+    await bot.send_message(
+        user_id=peer.peer_max_user_id,
+        text=f"{peer.sender_name} делится контактом по событию «{peer.event_title}»:\n\n{sent.contact_text}",
+        attachments=[ButtonsPayload(buttons=rows + menu_rows()).pack()],
+    )
 
 
 def register_contact_handlers(
@@ -146,7 +113,7 @@ def register_contact_handlers(
                 async with session_factory() as session:
                     peer = await ContactRepository(session).start(user.id, match_id)
                     await session.commit()
-                await event.ack("Пришли контакт — кнопка в сообщении ниже")
+                await event.ack("Пришли контакт следующим сообщением")
                 answered = True
                 await event.bot.send_message(
                     user_id=event.callback.user.user_id,

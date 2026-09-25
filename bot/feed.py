@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from integrations.kudago import format_price_text
 from infrastructure.cache.feed_buffer import FeedBufferStore
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingError, OnboardingRepository
-from infrastructure.db.repositories.feed import EventCard
+from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT, EventCard
 from .navigation import menu, menu_rows, plans_and_feed, profile_offer, report_error
 from .notifications import send_match_notifications
 
@@ -57,6 +57,11 @@ def _buttons(
             [CallbackButton(text="Хочу пойти", payload=f"feed:want:{card.id}|liked|{index}")],
             [CallbackButton(text="Убрать лайк", payload=f"feed:unlike:{card.id}|liked|{index}")],
         ]
+    elif mode == "plans" and card.for_kids:
+        # The social flow is 18+: no company search for children's events.
+        rows = [[CallbackButton(text="Отменить поход", payload=f"feed:cancel:{card.plan_id}|plans|{index}")]]
+        if card.is_liked:
+            rows.append([CallbackButton(text="Убрать лайк", payload=f"feed:unlike:{card.id}|plans|{index}")])
     elif mode == "plans":
         rows = [
             [CallbackButton(text="Смотреть компанию" if card.company_status == "looking" else "Найти компанию",
@@ -616,6 +621,12 @@ def register_feed_handlers(
                 async with session_factory() as session:
                     result = await FeedRepository(session).want_to_go(user_id, event_id)
                     await session.commit()
+                if not result.company_allowed:
+                    await edit_current(
+                        f"Событие добавлено в планы. {KIDS_COMPANY_TEXT}.",
+                        attachments=menu(),
+                    )
+                    return
                 await ask_about_company(edit_current, result.plan_id, mode, index)
             elif action in {"unlike", "cancel"}:
                 target, mode, index = value.split("|")

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
 from dotenv import load_dotenv
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from infrastructure.db.models import City, Event, EventSchedule, EventSource, EventTag, Tag
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_PROFILES
 from infrastructure.db.session import create_async_database_engine, create_session_factory
-from infrastructure.db.social_models import EventPlan, User
+from infrastructure.db.social_models import EventPlan, User, UserTagWeight
 
 
 DEMO_SOURCE = "dvizhmax_demo"
@@ -104,6 +105,22 @@ async def _demo_event(session, city: City) -> Event:
     return event
 
 
+async def _seed_interests(session, user: User, codes: tuple[str, ...] | None) -> None:
+    """Make the chosen interests exactly the given tags, so common interests are predictable."""
+    query = select(Tag).where(Tag.is_active.is_(True), Tag.show_in_onboarding.is_(True))
+    if codes is not None:
+        query = query.where(Tag.code.in_(codes))
+    chosen = {tag.id for tag in (await session.scalars(query)).all()}
+    existing = {weight.tag_id: weight for weight in (await session.scalars(
+        select(UserTagWeight).where(UserTagWeight.user_id == user.id)
+    )).all()}
+    for tag_id in chosen - existing.keys():
+        session.add(UserTagWeight(user_id=user.id, tag_id=tag_id, initial_weight=Decimal("1.0")))
+    for tag_id, weight in existing.items():
+        weight.initial_weight = Decimal("1.0") if tag_id in chosen else Decimal("0")
+    await session.flush()
+
+
 async def _seed_profiles(session, event: Event) -> None:
     for profile in DEMO_PROFILES:
         user = await session.scalar(select(User).where(User.max_user_id == profile.max_user_id))
@@ -121,6 +138,7 @@ async def _seed_profiles(session, event: Event) -> None:
         user.profile_status = "active"
         user.onboarding_step = "complete"
         await session.flush()
+        await _seed_interests(session, user, profile.interest_codes)
         plan = await session.scalar(select(EventPlan).where(
             EventPlan.user_id == user.id,
             EventPlan.event_id == event.id,

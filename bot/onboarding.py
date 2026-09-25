@@ -15,12 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from infrastructure.db.models import City, Tag
 from infrastructure.db.repositories import OnboardingError, OnboardingRepository
 from .contacts import handle_contact_message
-from .navigation import menu, menu_rows, profile_offer, report_error
+from .navigation import menu, menu_rows, report_error
 
 LOGGER = logging.getLogger(__name__)
 CONSENT_VERSION = "2026-09-20"
 MIN_INTERESTS = 3
 FREE_TEXT_NOTICE = "Сейчас здесь нужно выбрать действие кнопкой ниже."
+DELETE_BUTTON = CallbackButton(text="🗑 Удалить профиль", payload="onboarding:delete:ask")
 MVP_CITY_NAME = "Москва"
 GROUPS = (
     ("music_stage", "Музыка и сцена", frozenset({"concert", "theater", "cinema", "standup", "party", "dance", "festival"})),
@@ -128,7 +129,12 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             selected = await repo.selected_interest_ids(uid)
         if user.profile_status != "active":
             text = "Для поиска компании нужна анкета. Хочешь её создать? Твои планы и интересы сохранятся."
-            await answer(f"{notice}\n\n{text}" if notice else text, attachments=profile_offer())
+            rows = [
+                [CallbackButton(text="Создать / продолжить профиль", payload="onboarding:profile:create")],
+                [CallbackButton(text="Пока нет, к планам", payload="feed:browse:plans|0")],
+                [DELETE_BUTTON],
+            ]
+            await answer(f"{notice}\n\n{text}" if notice else text, attachments=keyboard(rows))
             return
         fields = (("name", "Имя"), ("gender", "Пол"), ("age", "Возраст"),
                   ("description", "Описание"), ("photo", "Фото"), ("interests", "Интересы"))
@@ -140,7 +146,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 f"Интересы: {', '.join(tag.name for tag in tags if tag.id in selected)}\n\nЧто изменить?")
         rows = [[CallbackButton(text=label, payload=f"onboarding:edit:{field}") for field, label in fields[i:i+2]]
                 for i in range(0, len(fields), 2)]
-        attachments = keyboard(rows + menu_rows())
+        attachments = keyboard(rows + [[DELETE_BUTTON]] + menu_rows())
         photo = _profile_photo_attachment(user.photo_url, user.photo_attachment)
         if photo is not None:
             attachments.insert(0, photo)
@@ -270,6 +276,22 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                     await OnboardingRepository(session).choose_city(uid, city.id)
                     await session.commit()
                 await resume(event, event.edit)
+                return
+            if action == "delete":
+                if value == "ask":
+                    await event.edit(
+                        "Удалить профиль навсегда?\n\n"
+                        "Анкета, интересы, лайки, планы, мэтчи и контакты будут удалены. Восстановить их нельзя.",
+                        attachments=keyboard([
+                            [CallbackButton(text="Да, удалить навсегда", payload="onboarding:delete:confirm")],
+                            [CallbackButton(text="Отмена", payload="onboarding:profile:show")],
+                        ]),
+                    )
+                elif value == "confirm":
+                    async with session_factory() as session:
+                        await OnboardingRepository(session).delete_account(uid)
+                        await session.commit()
+                    await event.edit("Профиль и все данные удалены. Чтобы начать заново, отправь /start.", attachments=[])
                 return
             if action == "profile":
                 if value == "show":
