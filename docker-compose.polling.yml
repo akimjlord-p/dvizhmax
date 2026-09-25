@@ -1,0 +1,10 @@
+# Long polling: local development or a server without a domain and TLS.
+#   docker compose -f docker-compose.yml -f docker-compose.polling.yml up -d --build
+# MAX does not deliver polling updates while the bot has a webhook subscription,
+# so use a separate test bot token rather than the production one.
+services:
+  bot:
+    environment:
+      MAX_TRANSPORT: long_polling
+      MAX_WEBHOOK_URL: ""
+    ports: !reset []

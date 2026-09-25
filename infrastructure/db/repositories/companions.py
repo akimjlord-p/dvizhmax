@@ -10,7 +10,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from ..social_models import CompanionInterest, CompanionView, EventPlan, Match, User, UserBlock
+from ..models import Tag
+from ..social_models import CompanionInterest, CompanionView, EventPlan, Match, User, UserBlock, UserTagWeight
 from .demo import DEMO_MAX_USER_IDS
 from .onboarding import OnboardingError
 
@@ -25,6 +26,7 @@ class CompanionCard:
     description: str | None
     photo_url: str | None
     photo_attachment: dict | None
+    common_interests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,16 +63,7 @@ class CompanionRepository:
             if claimed is None:
                 # Another callback displayed this person first. Try the next candidate.
                 continue
-            return CompanionCard(
-                plan_id=candidate_plan.id,
-                user_id=candidate.id,
-                name=candidate.name or "Без имени",
-                gender=candidate.gender,
-                age=candidate.age,
-                description=candidate.description,
-                photo_url=candidate.photo_url,
-                photo_attachment=candidate.photo_attachment,
-            )
+            return await self._card(user_id, candidate_plan, candidate)
 
     async def next_liker(self, user_id: UUID, plan_id: UUID) -> CompanionCard | None:
         """Show the newest person who liked this plan and still waits for an answer.
@@ -105,6 +98,9 @@ class CompanionRepository:
                 set_={"shown_at": func.now(), "reacted_at": None},
             )
         )
+        return await self._card(user_id, candidate_plan, candidate)
+
+    async def _card(self, viewer_id: UUID, candidate_plan: EventPlan, candidate: User) -> CompanionCard:
         return CompanionCard(
             plan_id=candidate_plan.id,
             user_id=candidate.id,
@@ -114,7 +110,26 @@ class CompanionRepository:
             description=candidate.description,
             photo_url=candidate.photo_url,
             photo_attachment=candidate.photo_attachment,
+            common_interests=await self.common_interests(viewer_id, candidate.id),
         )
+
+    async def common_interests(self, first_user_id: UUID, second_user_id: UUID) -> tuple[str, ...]:
+        """Interests both people chose in their profiles, not ones learned from reactions."""
+        theirs = aliased(UserTagWeight)
+        names = await self.session.scalars(
+            select(Tag.name)
+            .join(UserTagWeight, UserTagWeight.tag_id == Tag.id)
+            .join(theirs, theirs.tag_id == Tag.id)
+            .where(
+                UserTagWeight.user_id == first_user_id,
+                UserTagWeight.initial_weight > 0,
+                theirs.user_id == second_user_id,
+                theirs.initial_weight > 0,
+                Tag.is_active.is_(True),
+            )
+            .order_by(Tag.name)
+        )
+        return tuple(names)
 
     async def pending_liker_counts(self, user_id: UUID, plan_ids: list[UUID]) -> dict[UUID, int]:
         if not plan_ids:

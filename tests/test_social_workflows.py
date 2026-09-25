@@ -406,6 +406,21 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         send.assert_not_awaited()
         self.assertIn("демо-анкета", edit.call_args.args[0])
 
+    async def test_candidate_card_shows_only_interests_both_people_chose(self):
+        event = await self.event("Common interests")
+        async with self.factory() as session:
+            # Bob keeps "concert" only as a learned weight, not a chosen interest.
+            learned = await session.get(UserTagWeight, (self.other.id, self.tags[0].id))
+            learned.initial_weight, learned.reaction_weight = Decimal("0"), Decimal("0.5")
+            feed = FeedRepository(session)
+            alice = await feed.want_to_go(self.user.id, event.id)
+            bob = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, alice.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, bob.plan_id, looking=True)
+            await session.commit()
+        edit = await self.click(f"feed:company:yes|{alice.plan_id}|plans|0")
+        self.assertIn("Общие интересы: calm, lecture", edit.call_args.args[0])
+
     async def test_person_like_without_match_is_confirmed_on_the_card(self):
         event = await self.event("Person like")
         async with self.factory() as session:

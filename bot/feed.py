@@ -431,6 +431,8 @@ def register_feed_handlers(
         details.append(heading)
         if card.description:
             details.append(card.description)
+        if card.common_interests:
+            details.append(f"Общие интересы: {', '.join(card.common_interests)}")
         suffix = "|likers" if likers else ""
         attachments = [
             ButtonsPayload(
