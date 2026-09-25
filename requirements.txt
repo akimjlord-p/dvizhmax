@@ -1,8 +1,8 @@
-SQLAlchemy>=2.0,<2.1
-alembic>=1.13,<2
-psycopg[binary]>=3.2,<4
-httpx>=0.28,<0.29
-python-dotenv>=1.0,<2
-yandex-ai-studio-sdk>=0.19,<1
+SQLAlchemy==2.0.54
+alembic==1.20.0
+psycopg[binary]==3.3.6
+httpx==0.28.1
+python-dotenv==1.2.3
+yandex-ai-studio-sdk==0.22.1
 maxapi==1.2.2
-redis>=5.0,<6
+redis==5.3.1
