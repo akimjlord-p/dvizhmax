@@ -114,6 +114,12 @@ class OnboardingRepository:
             raise OnboardingError("Выбери хотя бы 3 интереса")
         user.onboarding_step = "complete"
 
+    async def leave_edit_mode(self, user_id: UUID) -> None:
+        """Drop an unfinished field edit, so later free text is not saved into that field."""
+        user = await self.require_user(user_id)
+        if user.profile_status == "active" and (user.onboarding_step or "").startswith("edit_"):
+            user.onboarding_step = "complete"
+
     @staticmethod
     def _advance(user: User, next_step: str) -> None:
         user.onboarding_step = "complete" if (user.onboarding_step or "").startswith("edit_") else next_step

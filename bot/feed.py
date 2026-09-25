@@ -280,7 +280,14 @@ def register_feed_handlers(
 
     async def user_uuid(max_user_id: int) -> UUID | None:
         user = await current_user(max_user_id)
-        return user.id if user and user.city_id is not None and user.onboarding_step != "consent" else None
+        if user is None or user.city_id is None or user.onboarding_step == "consent":
+            return None
+        if (user.onboarding_step or "").startswith("edit_"):
+            # Opening the feed, liked or plans abandons a profile edit.
+            async with session_factory() as session:
+                await OnboardingRepository(session).leave_edit_mode(user.id)
+                await session.commit()
+        return user.id
 
     async def refill_feed(user_id: UUID) -> None:
         if not await feed_buffer.acquire_refill_lock(user_id):
@@ -314,20 +321,23 @@ def register_feed_handlers(
         return task
 
     async def next_buffered_card(user_id: UUID) -> EventCard | None:
-        event_id = await feed_buffer.pop(user_id)
-        if event_id is None:
-            await start_refill(user_id)
+        refilled = False
+        while True:
             event_id = await feed_buffer.pop(user_id)
-
-        while event_id is not None:
+            if event_id is None:
+                # The queue may have run dry on stale cards (rated elsewhere, hidden since
+                # queued); refill once before telling the user the feed is empty.
+                if refilled:
+                    return None
+                await start_refill(user_id)
+                refilled = True
+                continue
             async with session_factory() as session:
                 card = await FeedRepository(session).buffered_card(user_id, event_id)
             if card is not None:
                 if await feed_buffer.pending_count(user_id) == FEED_REFILL_TRIGGER_REMAINING:
                     start_refill(user_id)
                 return card
-            event_id = await feed_buffer.pop(user_id)
-        return None
 
     async def render_event_card(
         answer,

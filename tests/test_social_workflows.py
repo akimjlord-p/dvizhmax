@@ -385,6 +385,33 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             row = await session.scalar(select(MatchContact).where(MatchContact.match_id == match_id))
             self.assertEqual(row.status, "sent")
 
+    async def test_leaving_profile_edit_through_the_menu_does_not_overwrite_the_field(self):
+        await self.event("Some event")
+        await self.click("onboarding:edit:name")
+        await self.click("feed:browse:feed|0")
+        event_message = message("привет", 100)
+        handler = await select_handler(self.dispatcher, event_message)
+        with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(event_message)
+        self.assertIn("нужно выбрать действие", answer.call_args.args[0])
+        async with self.factory() as session:
+            user = await session.get(User, self.user.id)
+            self.assertEqual((user.name, user.onboarding_step), ("Alice", "complete"))
+
+    async def test_feed_refills_when_every_queued_card_became_stale(self):
+        first, second, third = await self.event("First"), await self.event("Second"), await self.event("Third")
+        edit = await self.click("feed:browse:feed|0")  # queues all three, shows one
+        shown = next(e for e in (first, second, third) if e.title in edit.call_args.args[0])
+        async with self.factory() as session:
+            repo = FeedRepository(session)
+            for stale in {first, second, third} - {shown}:
+                await repo.record_reaction(self.user.id, stale.id, "skip")
+            await session.commit()
+        fresh = await self.event("Fresh")
+        edit = await self.click("feed:browse:feed|0")
+        self.assertIn("Fresh", edit.call_args.args[0])
+        self.assertNotEqual(fresh.id, shown.id)
+
     async def test_childrens_events_are_hidden_from_the_feed(self):
         adult, kids = await self.event("Концерт"), await self.event("Плавание для детей")
         async with self.factory() as session:
@@ -669,6 +696,22 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({interest.status for interest in interests}, {"withdrawn"})
             match = await session.scalar(select(Match).where(Match.event_id == event.id))
             self.assertEqual(match.status, "closed")
+
+    async def test_demo_command_undoes_a_skip_on_the_demo_card(self):
+        event = await self.event(event_id=DEMO_EVENT_ID)
+        async with self.factory() as session:
+            (await session.get(User, self.other.id)).max_user_id = DEMO_MAX_USER_ID
+            feed = FeedRepository(session)
+            demo_plan = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.other.id, demo_plan.plan_id, looking=True)
+            await feed.record_reaction(self.user.id, event.id, "skip")
+            await session.commit()
+        async with self.factory() as session:
+            await DemoRepository(session).reset_for_user(self.user.id)
+            await session.commit()
+        async with self.factory() as session:
+            result = await FeedRepository(session).want_to_go(self.user.id, event.id)
+            self.assertTrue(result.was_created)
 
     async def test_fixed_demo_profile_is_available_for_any_company_search_event(self):
         event = await self.event("Ordinary event")

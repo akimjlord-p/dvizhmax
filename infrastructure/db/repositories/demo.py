@@ -8,7 +8,7 @@ from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..social_models import CompanionInterest, CompanionView, EventPlan, Match, User
+from ..social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, User
 
 
 DEMO_EVENT_ID = uuid5(NAMESPACE_URL, "dvizhmax:demo:match-flow:v1")
@@ -91,6 +91,12 @@ class DemoRepository:
         if not demo_plans:
             return None
         event_id = DEMO_EVENT_ID
+        # "Не моё" on the demo card would block "Хочу пойти" there for good.
+        await self.session.execute(delete(EventReaction).where(
+            EventReaction.user_id == user_id,
+            EventReaction.event_id == event_id,
+            EventReaction.reaction == "skip",
+        ))
         user_plan = await self.session.scalar(select(EventPlan).where(
             EventPlan.user_id == user_id,
             EventPlan.event_id == event_id,
