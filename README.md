@@ -128,8 +128,9 @@ docker compose --profile tools run --rm profile-reset  # удалить все �
 
 ```bash
 git pull --ff-only
-docker compose build bot catalog-worker
-docker compose run --rm migrate
+docker compose build bot catalog-worker migrate
+docker compose --profile tools build               # образы demo-seed, demo-reset, profile-reset
+docker compose run --rm migrate                    # у migrate свой образ: без build выше он возьмёт старые миграции
 docker compose up -d --no-deps --force-recreate bot catalog-worker
 ```
 
