@@ -21,6 +21,10 @@ LOGGER = logging.getLogger(__name__)
 CONSENT_VERSION = "2026-09-20"
 MIN_INTERESTS = 3
 FREE_TEXT_NOTICE = "Сейчас здесь нужно выбрать действие кнопкой ниже."
+PHOTO_NOT_RECOGNIZED = (
+    "Не получилось распознать вложение как фото. "
+    "Отправь изображение именно как фотографию или нажми «Пропустить»."
+)
 DELETE_BUTTON = CallbackButton(text="🗑 Удалить профиль", payload="onboarding:delete:ask")
 MVP_CITY_NAME = "Москва"
 GROUPS = (
@@ -372,7 +376,8 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
         unexpected_step: str | None = None
         async with session_factory() as session:
             repo = OnboardingRepository(session)
-            step = ((await repo.require_user(uid)).onboarding_step or "").removeprefix("edit_")
+            raw_step = (await repo.require_user(uid)).onboarding_step or ""
+            step = raw_step.removeprefix("edit_")
             try:
                 if step == "name":
                     await repo.set_name(uid, text)
@@ -385,7 +390,12 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 elif step == "photo":
                     image = _photo(event)
                     if image is None:
-                        await event.message.answer("Прикрепи изображение или нажми «Пропустить».", attachments=keyboard([[CallbackButton(text="Пропустить", payload="onboarding:photo:skip")]]))
+                        # While editing, "skip" would delete the current photo: offer "Назад".
+                        button = (CallbackButton(text="Назад", payload="onboarding:edit:back")
+                                  if raw_step.startswith("edit_")
+                                  else CallbackButton(text="Пропустить", payload="onboarding:photo:skip"))
+                        hint = PHOTO_NOT_RECOGNIZED if event.message.body.attachments else "Прикрепи фото или нажми «Пропустить»."
+                        await event.message.answer(hint, attachments=keyboard([[button]]))
                         return
                     await repo.set_photo(uid, photo_url=image[0], photo_attachment=image[1])
                 elif step == "complete" and await repo.has_consent(uid, consent_version):

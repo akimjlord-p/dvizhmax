@@ -29,6 +29,7 @@ from infrastructure.db.repositories import CompanionRepository, DemoRepository, 
 from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_EVENT_ID, DEMO_MAX_USER_ID, DEMO_MAX_USER_IDS
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact, User, UserTagWeight
 from bot.feed import DEMO_RESET_PAYLOAD, NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
+from bot.onboarding import PHOTO_NOT_RECOGNIZED
 from workers.demo_seed import _seed_profiles
 from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT
 from bot.navigation import ERROR_TEXT, MENU_PAYLOAD
@@ -609,6 +610,29 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         sent = callback_event.bot.send_message.await_args
         self.assertEqual(sent.kwargs["text"], ERROR_TEXT)
         self.assertEqual(payloads(sent.kwargs["attachments"]), ["feed:browse:feed|0", MENU_PAYLOAD])
+
+    async def test_image_sent_as_file_is_explained_and_keeps_the_photo(self):
+        async with self.factory() as session:
+            user = await session.get(User, self.user.id)
+            user.photo_url = "https://example.test/old.jpg"
+            user.onboarding_step = "edit_photo"
+            await session.commit()
+        event_message = MessageCreated.model_validate({
+            "update_type": "message_created", "timestamp": 0,
+            "message": {"sender": {"user_id": 100, "first_name": "A", "is_bot": False, "last_activity_time": 0},
+                        "recipient": {"chat_id": 100, "chat_type": "dialog"}, "timestamp": 0,
+                        "body": {"mid": "m3", "seq": 3, "text": None, "attachments": [{
+                            "type": "file", "filename": "photo.jpg", "size": 1024,
+                            "payload": {"url": "https://example.test/photo.jpg", "token": "t"},
+                        }]}},
+        })
+        handler = await select_handler(self.dispatcher, event_message)
+        with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(event_message)
+        self.assertEqual(answer.call_args.args[0], PHOTO_NOT_RECOGNIZED)
+        self.assertEqual(payloads(answer.call_args.kwargs["attachments"]), ["onboarding:edit:back"])
+        async with self.factory() as session:
+            self.assertEqual((await session.get(User, self.user.id)).photo_url, "https://example.test/old.jpg")
 
     async def test_free_text_after_onboarding_shows_menu_not_profile(self):
         event_message = message("Хуй", 100)
