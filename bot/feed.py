@@ -56,7 +56,12 @@ def _buttons(
     index: int = 0,
     total: int = 1,
 ) -> list:
-    if mode == "liked":
+    if mode == "demo":
+        rows = [
+            [CallbackButton(text="Хочу пойти", payload=f"feed:want:{card.id}")],
+            [CallbackButton(text=DEMO_RESET_TEXT, payload=DEMO_RESET_PAYLOAD)],
+        ]
+    elif mode == "liked":
         rows = [
             [CallbackButton(text="Хочу пойти", payload=f"feed:want:{card.id}|liked|{index}")],
             [CallbackButton(text="Убрать лайк", payload=f"feed:unlike:{card.id}|liked|{index}")],
@@ -86,9 +91,7 @@ def _buttons(
             ],
             [CallbackButton(text="Хочу пойти", payload=f"feed:want:{card.id}")],
         ]
-    if mode == "demo":
-        rows.append([CallbackButton(text=DEMO_RESET_TEXT, payload=DEMO_RESET_PAYLOAD)])
-    else:
+    if mode != "demo":
         rows.append([LinkButton(text=_source_label(card.source_url), url=card.source_url)])
     if mode not in {"feed", "demo"}:
         navigation = []
@@ -358,7 +361,8 @@ def register_feed_handlers(
     ) -> None:
         text = card_text(card)
         if heading is not None:
-            text = f"{heading} · {index + 1}/{total}\n\n{text}"
+            counter = f" · {index + 1}/{total}" if mode in {"liked", "plans"} else ""
+            text = f"{heading}{counter}\n\n{text}"
         try:
             await answer(
                 text,
@@ -557,7 +561,7 @@ def register_feed_handlers(
         if card is None:
             await answer("Демо ещё не подготовлено. Запусти seed на сервере.", attachments=menu())
             return
-        await render_event_card(answer, card, bot=bot, mode="demo", heading="Демо мэтча")
+        await render_event_card(answer, card, bot=bot, mode="demo", heading="Демо-сценарий")
 
     @dispatcher.message_callback(F.callback.payload.startswith("feed:"))
     async def on_feed_callback(event: MessageCallback) -> None:

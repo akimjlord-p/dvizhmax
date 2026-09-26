@@ -819,8 +819,12 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ])
 
         edit = await self.click(DEMO_RESET_PAYLOAD)
-        self.assertIn("Демо мэтча", edit.call_args.args[0])
-        self.assertIn(DEMO_RESET_PAYLOAD, payloads(edit.call_args.kwargs["attachments"]))
+        self.assertIn("Демо-сценарий", edit.call_args.args[0])
+        demo_buttons = payloads(edit.call_args.kwargs["attachments"])
+        self.assertIn(DEMO_RESET_PAYLOAD, demo_buttons)
+        self.assertIn(f"feed:want:{event.id}", demo_buttons)
+        # No like/skip on the demo card: they would jump into the regular feed.
+        self.assertFalse([p for p in demo_buttons if p.startswith(("feed:like:", "feed:skip:"))])
         async with self.factory() as session:
             first = await CompanionRepository(session).next_candidate(self.user.id, plan_id)
             self.assertEqual(first.name, "Демо Лёша")

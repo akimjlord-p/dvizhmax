@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from sqlalchemy import or_, select, update
@@ -86,7 +87,10 @@ async def _demo_event(session, city: City) -> Event:
         source.is_primary = True
 
     schedule = await session.scalar(select(EventSchedule).where(EventSchedule.event_source_id == source.id))
-    starts_at = datetime.now(timezone.utc) + timedelta(days=7)
+    # A week ahead at 19:00 Moscow time, so the demo card shows a natural time.
+    moscow = ZoneInfo("Europe/Moscow")
+    day = (datetime.now(moscow) + timedelta(days=7)).date()
+    starts_at = datetime.combine(day, time(19, 0), tzinfo=moscow).astimezone(timezone.utc)
     if schedule is None:
         session.add(EventSchedule(
             event_source_id=source.id,
