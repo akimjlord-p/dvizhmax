@@ -94,6 +94,8 @@ class NotificationRepository:
                     sender_plan.status == "planned",
                     sender_plan.company_status == "looking",
                     sender.max_user_id.not_in(DEMO_MAX_USER_IDS),
+                    # Demo profiles have no MAX account to notify.
+                    recipient.max_user_id.not_in(DEMO_MAX_USER_IDS),
                     ~exists(
                         select(reverse_interest.id).where(
                             reverse_interest.sender_plan_id == recipient_plan.id,

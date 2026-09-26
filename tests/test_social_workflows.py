@@ -851,6 +851,24 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertEqual(await NotificationRepository(session).unannounced_interest_digests(), [])
 
+    async def test_like_to_a_demo_profile_sends_no_digest(self):
+        event = await self.event("Like a demo")
+        async with self.factory() as session:
+            (await session.get(User, self.other.id)).max_user_id = DEMO_MAX_USER_ID
+            feed = FeedRepository(session)
+            user_plan = await feed.want_to_go(self.user.id, event.id)
+            demo_plan = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.user.id, user_plan.plan_id, looking=True)
+            await feed.set_company_search(self.other.id, demo_plan.plan_id, looking=True)
+            session.add(CompanionInterest(
+                sender_plan_id=user_plan.plan_id,
+                recipient_plan_id=demo_plan.plan_id,
+                event_id=event.id,
+            ))
+            await session.commit()
+        async with self.factory() as session:
+            self.assertEqual(await NotificationRepository(session).unannounced_interest_digests(), [])
+
     async def test_person_who_liked_after_a_skip_is_offered_again_as_a_liker(self):
         event = await self.event("Likers")
         async with self.factory() as session:
