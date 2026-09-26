@@ -25,7 +25,7 @@ from infrastructure.db.social_models import (
     Notification,
     NotificationInterest,
 )
-from workers.demo_seed import _demo_event, _seed_profiles, _seed_team_profiles
+from workers.demo_seed import _demo_event, _detach_demo_from_other_events, _seed_profiles, _seed_team_profiles
 
 
 async def reset_demo_event() -> dict[str, int]:
@@ -67,6 +67,7 @@ async def reset_demo_event() -> dict[str, int]:
             city = await session.scalar(select(City).where(City.name == "Москва").limit(1))
             event = await _demo_event(session, city)
             await _seed_profiles(session, event)
+            await _detach_demo_from_other_events(session)
             team_profiles = await _seed_team_profiles(session, event)
             await session.commit()
             print(

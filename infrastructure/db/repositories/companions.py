@@ -5,14 +5,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from ..models import Tag
 from ..social_models import CompanionInterest, CompanionView, EventPlan, Match, User, UserBlock, UserTagWeight
-from .demo import DEMO_MAX_USER_IDS
+from .demo import DEMO_CANDIDATE_ORDER, DEMO_MAX_USER_IDS
 from .onboarding import OnboardingError
 
 
@@ -342,7 +342,10 @@ class CompanionRepository:
                         )
                     ),
                 )
-                .order_by(EventPlan.created_at.desc())
+                .order_by(
+                    case(DEMO_CANDIDATE_ORDER, value=User.max_user_id, else_=len(DEMO_CANDIDATE_ORDER)),
+                    EventPlan.created_at.desc(),
+                )
                 .limit(1)
             )
         ).first()

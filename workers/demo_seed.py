@@ -8,12 +8,12 @@ from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
 from dotenv import load_dotenv
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 
 from infrastructure.db.models import City, Event, EventSchedule, EventSource, EventTag, Tag
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_PROFILES
 from infrastructure.db.session import create_async_database_engine, create_session_factory
-from infrastructure.db.social_models import EventPlan, User, UserTagWeight
+from infrastructure.db.social_models import CompanionInterest, EventPlan, Match, User, UserTagWeight
 
 
 DEMO_SOURCE = "dvizhmax_demo"
@@ -150,6 +150,27 @@ async def _seed_profiles(session, event: Event) -> None:
         plan.company_status = "looking"
 
 
+async def _detach_demo_from_other_events(session) -> None:
+    """Demo profiles live only on the demo event; drop what older versions left elsewhere."""
+    demo_users = select(User.id).where(User.max_user_id.in_([profile.max_user_id for profile in DEMO_PROFILES]))
+    stray_plans = select(EventPlan.id).where(EventPlan.user_id.in_(demo_users), EventPlan.event_id != DEMO_EVENT_ID)
+    await session.execute(
+        update(CompanionInterest)
+        .where(or_(CompanionInterest.sender_plan_id.in_(stray_plans), CompanionInterest.recipient_plan_id.in_(stray_plans)))
+        .values(status="withdrawn")
+    )
+    await session.execute(
+        update(Match)
+        .where(Match.event_id != DEMO_EVENT_ID, or_(Match.first_user_id.in_(demo_users), Match.second_user_id.in_(demo_users)))
+        .values(status="closed")
+    )
+    await session.execute(
+        update(EventPlan)
+        .where(EventPlan.id.in_(stray_plans))
+        .values(status="cancelled", company_status="not_looking")
+    )
+
+
 async def _seed_team_profiles(session, event: Event) -> int:
     """Add opted-in team profiles to the fixed demo event as real candidates."""
     max_user_ids = _team_demo_user_ids()
@@ -184,6 +205,7 @@ async def main() -> None:
                 raise RuntimeError("Сначала загрузите каталог Москвы")
             event = await _demo_event(session, city)
             await _seed_profiles(session, event)
+            await _detach_demo_from_other_events(session)
             team_profiles = await _seed_team_profiles(session, event)
             await session.commit()
             print(f"Fixed demo match is ready for event {event.id}; team profiles={team_profiles}")

@@ -20,7 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from integrations.kudago import format_price_text
 from infrastructure.cache.feed_buffer import FeedBufferStore
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingError, OnboardingRepository
+from infrastructure.db.repositories.demo import DEMO_EVENT_ID
 from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT, EventCard
+from infrastructure.db.social_models import EventPlan
 from .navigation import menu, menu_rows, plans_and_feed, profile_offer, report_error
 from .notifications import send_match_notifications
 
@@ -31,6 +33,8 @@ FEED_REFILL_TRIGGER_REMAINING = 1
 PLACEHOLDER_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "images" / "event-no-image.jpg"
 DEMO_PROFILE_ASSETS_DIR = PLACEHOLDER_IMAGE_PATH.parent
 LOGGER = logging.getLogger(__name__)
+DEMO_RESET_TEXT = "🔄 Сбросить демо"
+DEMO_RESET_PAYLOAD = "feed:demo:reset"
 NO_CANDIDATES_TEXT = "Других анкет для этого события пока нет. Попробуй поиск позже."
 PERSON_LIKED_STATUS = "👍 Лайк отправлен. Если интерес будет взаимным — сообщим о мэтче."
 
@@ -82,8 +86,11 @@ def _buttons(
             ],
             [CallbackButton(text="Хочу пойти", payload=f"feed:want:{card.id}")],
         ]
-    rows.append([LinkButton(text=_source_label(card.source_url), url=card.source_url)])
-    if mode != "feed":
+    if mode == "demo":
+        rows.append([CallbackButton(text=DEMO_RESET_TEXT, payload=DEMO_RESET_PAYLOAD)])
+    else:
+        rows.append([LinkButton(text=_source_label(card.source_url), url=card.source_url)])
+    if mode not in {"feed", "demo"}:
         navigation = []
         if index > 0:
             navigation.append(CallbackButton(text="← Назад", payload=f"feed:browse:{mode}|{index - 1}"))
@@ -417,6 +424,15 @@ def register_feed_handlers(
         async with session_factory() as session:
             card = await CompanionRepository(session).next_candidate(user_id, plan_id)
             if card is None:
+                plan = await session.get(EventPlan, plan_id)
+                if plan is not None and plan.event_id == DEMO_EVENT_ID:
+                    await answer(
+                        "Все анкеты на демо-событии просмотрены. Сбрось демо, чтобы пройти сценарий заново.",
+                        attachments=[ButtonsPayload(buttons=[
+                            [CallbackButton(text=DEMO_RESET_TEXT, payload=DEMO_RESET_PAYLOAD)],
+                        ] + menu_rows()).pack()],
+                    )
+                    return
                 await answer(NO_CANDIDATES_TEXT, attachments=plans_and_feed())
                 return
             await render_companion(answer, card, bot=bot)
@@ -524,9 +540,12 @@ def register_feed_handlers(
         if user_id is None:
             await event.message.answer("Сначала пройди старт: /start")
             return
-        user = await current_user(sender.user_id)
+        await start_demo(event.message.answer, sender.user_id, user_id, event.bot)
+
+    async def start_demo(answer, max_user_id: int, user_id: UUID, bot: Bot) -> None:
+        user = await current_user(max_user_id)
         if user is None or user.profile_status != "active":
-            await event.message.answer("Для демо мэтча сначала создай анкету через /profile.")
+            await answer("Для демо мэтча сначала создай анкету через /profile.", attachments=menu())
             return
         async with session_factory() as session:
             event_id = await DemoRepository(session).reset_for_user(user_id)
@@ -536,9 +555,9 @@ def register_feed_handlers(
             )
             await session.commit()
         if card is None:
-            await event.message.answer("Демо ещё не подготовлено. Запусти seed на сервере.", attachments=menu())
+            await answer("Демо ещё не подготовлено. Запусти seed на сервере.", attachments=menu())
             return
-        await render_event_card(event.message.answer, card, bot=event.bot, mode="feed", heading="Демо мэтча")
+        await render_event_card(answer, card, bot=bot, mode="demo", heading="Демо мэтча")
 
     @dispatcher.message_callback(F.callback.payload.startswith("feed:"))
     async def on_feed_callback(event: MessageCallback) -> None:
@@ -614,6 +633,8 @@ def register_feed_handlers(
         try:
             if action == "menu":
                 await send_next_card("Главное меню", attachments=menu())
+            elif action == "demo":
+                await start_demo(send_next_card, event.callback.user.user_id, user_id, event.bot)
             elif action == "browse":
                 mode, index = value.split("|")
                 await browse(send_next_card, user_id, event.bot, mode, int(index))

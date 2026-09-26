@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.repositories import ContactRepository, OnboardingError, OnboardingRepository
 from infrastructure.db.repositories.contacts import ContactPeer, SentContact
-from infrastructure.db.repositories.demo import DEMO_MAX_USER_IDS
+from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_MAX_USER_IDS
 from .navigation import menu, menu_rows, report_error
 
 
@@ -27,8 +27,8 @@ def _share_button(match_id: UUID, text: str = "Поделиться контак
 
 def request_text(peer: ContactPeer) -> str:
     return (
-        f"Отправь ссылку-приглашение MAX или другой контакт, которым готов поделиться с {peer.peer_name}. "
-        "Мы покажем его только после подтверждения."
+        f"Напиши контакт, которым готов поделиться с {peer.peer_name}: ссылку-приглашение MAX, @ник или телефон. "
+        "Бот передаст его дословно и не проверяет."
     )
 
 
@@ -41,7 +41,8 @@ def request_attachments(match_id: UUID) -> list:
 def confirm_attachments(match_id: UUID) -> list:
     return [ButtonsPayload(buttons=[
         [CallbackButton(text="Да, отправить", payload=f"contact:confirm:{match_id}")],
-        [CallbackButton(text="Отмена", payload=f"contact:cancel:{match_id}")],
+        [CallbackButton(text="Изменить", payload=f"contact:edit:{match_id}"),
+         CallbackButton(text="Отмена", payload=f"contact:cancel:{match_id}")],
     ]).pack()]
 
 
@@ -74,7 +75,7 @@ async def handle_contact_message(
             return True
         await session.commit()
     await event.message.answer(
-        f"Отправить этот контакт пользователю {saved.peer.peer_name}?\n\n{saved.contact_text}",
+        f"{saved.peer.peer_name} получит ровно этот текст:\n\n{saved.contact_text}",
         attachments=confirm_attachments(saved.peer.match_id),
     )
     return True
@@ -109,7 +110,7 @@ def register_contact_handlers(
                 await event.ack("Сначала пройди /start")
                 return
 
-            if action == "share":
+            if action in {"share", "edit"}:
                 async with session_factory() as session:
                     peer = await ContactRepository(session).start(user.id, match_id)
                     await session.commit()
@@ -148,10 +149,17 @@ def register_contact_handlers(
                     await session.commit()
                 text = f"Контакт отправлен: {sent.peer.peer_name}."
                 if demo_peer:
-                    text += "\n\nЭто демо-анкета: в настоящем мэтче контакт получил бы второй человек."
+                    text += "\n\nЭто демо-анкета, в ответ она делится своим демо-контактом."
                 elif not sent.peer_has_shared:
                     text += f"\n\nЕсли {sent.peer.peer_name} тоже поделится контактом, мы пришлём его сюда."
                 await event.edit(text, attachments=menu(), notify=False)
+                if demo_peer:
+                    # Show the receiving side of the exchange as well.
+                    await event.bot.send_message(
+                        user_id=event.callback.user.user_id,
+                        text=f"{sent.peer.peer_name} делится контактом по событию «{sent.peer.event_title}»:\n\n{DEMO_CONTACT_TEXT}",
+                        attachments=menu(),
+                    )
         except (OnboardingError, ValueError) as exc:
             if not answered:
                 await event.ack(str(exc))

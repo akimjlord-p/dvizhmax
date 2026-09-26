@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Place, Tag
 from ..social_models import CompanionInterest, EventPlan, EventReaction, Match, User, UserTagWeight
+from .demo import DEMO_EVENT_ID
 from .onboarding import OnboardingError
 
 
@@ -96,7 +97,7 @@ class FeedRepository:
             return []
         cards, weights, reaction_count, history = await self._candidate_cards(
             user_id,
-            excluded_event_ids=excluded_event_ids,
+            excluded_event_ids=(*excluded_event_ids, DEMO_EVENT_ID),
         )
         return rank_cards(
             cards,

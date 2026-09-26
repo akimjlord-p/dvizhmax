@@ -26,9 +26,10 @@ from bot.feed import register_feed_handlers
 from bot.onboarding import CONSENT_VERSION, register_onboarding_handlers
 from infrastructure.db.models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Tag
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, NotificationRepository, OnboardingRepository, OnboardingError
-from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_MAX_USER_ID
+from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_EVENT_ID, DEMO_MAX_USER_ID, DEMO_MAX_USER_IDS
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact, User, UserTagWeight
-from bot.feed import NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
+from bot.feed import DEMO_RESET_PAYLOAD, NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
+from workers.demo_seed import _seed_profiles
 from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT
 from bot.navigation import ERROR_TEXT, MENU_PAYLOAD
 from test_bot_routing import callback, message, select_handler
@@ -363,10 +364,17 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         # A MAX contact card is not accepted: the phone must be typed on purpose.
         vcf = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+79990001122\nEND:VCARD"
         answer = await self.send_contact(contact={"vcf_info": vcf})
-        self.assertIn("Отправь ссылку-приглашение MAX", answer.call_args.args[0])
+        self.assertIn("Бот передаст его дословно и не проверяет", answer.call_args.args[0])
 
         answer = await self.send_contact(text="https://max.ru/join/alice")
-        self.assertIn("Отправить этот контакт пользователю Bob?", answer.call_args.args[0])
+        self.assertIn("Bob получит ровно этот текст", answer.call_args.args[0])
+        self.assertEqual(payloads(answer.call_args.kwargs["attachments"]), [
+            f"contact:confirm:{match_id}", f"contact:edit:{match_id}", f"contact:cancel:{match_id}",
+        ])
+        send, _, _ = await self.press(f"contact:edit:{match_id}")
+        self.assertIn("Бот передаст его дословно", send.await_args.kwargs["text"])
+        answer = await self.send_contact(text="https://max.ru/join/alice")
+        self.assertIn("https://max.ru/join/alice", answer.call_args.args[0])
         async with self.factory() as session:
             user = await session.get(User, self.user.id)
             self.assertEqual(user.name, "Alice")  # the contact did not leak into the profile
@@ -465,8 +473,11 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.press(f"contact:share:{match_id}")
         await self.send_contact(text="@alice")
         send, edit, _ = await self.press(f"contact:confirm:{match_id}")
-        send.assert_not_awaited()
         self.assertIn("демо-анкета", edit.call_args.args[0])
+        # Nothing goes to the fake account; the demo replies with its own contact instead.
+        reply = send.await_args.kwargs
+        self.assertEqual(reply["user_id"], 100)
+        self.assertIn(DEMO_CONTACT_TEXT, reply["text"])
 
     async def test_candidate_card_shows_only_interests_both_people_chose(self):
         event = await self.event("Common interests")
@@ -747,7 +758,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             result = await FeedRepository(session).want_to_go(self.user.id, event.id)
             self.assertTrue(result.was_created)
 
-    async def test_fixed_demo_profile_is_available_for_any_company_search_event(self):
+    async def test_demo_profiles_are_never_attached_to_ordinary_events(self):
         event = await self.event("Ordinary event")
         async with self.factory() as session:
             demo_user = await session.get(User, self.other.id)
@@ -755,24 +766,66 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             feed = FeedRepository(session)
             user_plan = await feed.want_to_go(self.user.id, event.id)
             await feed.set_company_search(self.user.id, user_plan.plan_id, looking=True)
-            self.assertTrue(await DemoRepository(session).ensure_candidates_for_plan(
+            self.assertFalse(await DemoRepository(session).ensure_candidates_for_plan(
                 user_id=self.user.id,
                 user_plan_id=user_plan.plan_id,
             ))
             await session.commit()
-
         async with self.factory() as session:
-            demo_plan = await session.scalar(select(EventPlan).where(
-                EventPlan.user_id == self.other.id,
-                EventPlan.event_id == event.id,
-            ))
-            self.assertIsNotNone(demo_plan)
-            self.assertEqual((demo_plan.status, demo_plan.company_status), ("planned", "looking"))
-            interest = await session.scalar(select(CompanionInterest).where(
-                CompanionInterest.sender_plan_id == demo_plan.id,
-                CompanionInterest.recipient_plan_id == user_plan.plan_id,
-            ))
-            self.assertEqual((interest.event_id, interest.status), (event.id, "active"))
+            self.assertIsNone(await session.scalar(select(EventPlan).where(
+                EventPlan.user_id == self.other.id, EventPlan.event_id == event.id,
+            )))
+
+    async def seed_demo(self):
+        event = await self.event("Демо-встреча ДвижМАКС", event_id=DEMO_EVENT_ID)
+        async with self.factory() as session:
+            await _seed_profiles(session, await session.get(Event, event.id))
+            await session.commit()
+        return event
+
+    async def test_demo_shows_three_scripted_candidates_and_resets(self):
+        event = await self.seed_demo()
+        async with self.factory() as session:
+            demo = {user.max_user_id: user.id for user in (await session.scalars(
+                select(User).where(User.max_user_id.in_(DEMO_MAX_USER_IDS))
+            )).all()}
+            cards = await FeedRepository(session).next_cards(self.user.id, limit=10)
+            self.assertNotIn(event.id, [card.id for card in cards])
+
+        async def run_demo():
+            async with self.factory() as session:
+                self.assertEqual(await DemoRepository(session).reset_for_user(self.user.id), event.id)
+                feed = FeedRepository(session)
+                plan = await feed.want_to_go(self.user.id, event.id)
+                await feed.set_company_search(self.user.id, plan.plan_id, looking=True)
+                await DemoRepository(session).ensure_candidates_for_plan(user_id=self.user.id, user_plan_id=plan.plan_id)
+                await session.commit()
+            return plan.plan_id
+
+        plan_id = await run_demo()
+        results = []
+        async with self.factory() as session:
+            people = CompanionRepository(session)
+            while (card := await people.next_candidate(self.user.id, plan_id)) is not None:
+                if card.user_id not in demo.values():
+                    break
+                result = await people.react(self.user.id, card.plan_id, liked=True)
+                results.append((card.name, card.common_interests, result.created_match))
+            await session.commit()
+        self.assertEqual(results, [
+            ("Демо Лёша", (), False),
+            ("Демо Саша", ("calm", "concert", "lecture"), False),
+            ("Демо Катя", (), True),
+        ])
+
+        edit = await self.click(DEMO_RESET_PAYLOAD)
+        self.assertIn("Демо мэтча", edit.call_args.args[0])
+        self.assertIn(DEMO_RESET_PAYLOAD, payloads(edit.call_args.kwargs["attachments"]))
+        async with self.factory() as session:
+            first = await CompanionRepository(session).next_candidate(self.user.id, plan_id)
+            self.assertEqual(first.name, "Демо Лёша")
+            match = await session.scalar(select(Match).where(Match.event_id == event.id))
+            self.assertEqual(match.status, "closed")
 
     async def test_demo_profile_interest_is_excluded_from_the_digest(self):
         event = await self.event("Ordinary event")
