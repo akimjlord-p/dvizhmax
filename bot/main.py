@@ -1,4 +1,4 @@
-"""Webhook process for the ДвижМАКС MAX bot."""
+"""Entry point of the ДвижМАКС MAX bot: long polling or webhook, see MAX_TRANSPORT."""
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +34,7 @@ async def _register_webhook(bot: Bot) -> None:
 async def main() -> None:
     load_dotenv()
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    transport = os.getenv("MAX_TRANSPORT", "webhook").strip().lower()
+    transport = os.getenv("MAX_TRANSPORT", "long_polling").strip().lower()
     bot = Bot()
     dispatcher = Dispatcher()
     engine = create_async_database_engine()
