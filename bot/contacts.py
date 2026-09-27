@@ -12,7 +12,7 @@ from maxapi import Bot, Dispatcher, F
 from maxapi.types import ButtonsPayload, CallbackButton, MessageCallback, MessageCreated
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from infrastructure.db.repositories import ContactRepository, OnboardingError, OnboardingRepository
+from infrastructure.db.repositories import ContactRepository, OnboardingRepository, UserError
 from infrastructure.db.repositories.contacts import ContactPeer, SentContact
 from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_MAX_USER_IDS
 from .navigation import menu, menu_rows, report_error
@@ -69,8 +69,8 @@ async def handle_contact_message(
             await event.message.answer(request_text(pending.peer), attachments=request_attachments(pending.peer.match_id))
             return True
         try:
-            saved = await repo.set_contact(user_id, contact_text=contact, contact_attachment=None)
-        except OnboardingError as exc:
+            saved = await repo.set_contact(user_id, contact_text=contact)
+        except UserError as exc:
             await event.message.answer(str(exc), attachments=request_attachments(pending.peer.match_id))
             return True
         await session.commit()
@@ -160,7 +160,7 @@ def register_contact_handlers(
                         text=f"{sent.peer.peer_name} делится контактом по событию «{sent.peer.event_title}»:\n\n{DEMO_CONTACT_TEXT}",
                         attachments=menu(),
                     )
-        except (OnboardingError, ValueError) as exc:
+        except UserError as exc:
             if not answered:
                 await event.ack(str(exc))
         except Exception:

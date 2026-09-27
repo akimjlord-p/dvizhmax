@@ -13,7 +13,7 @@ from sqlalchemy.orm import aliased
 from ..models import Tag
 from ..social_models import CompanionInterest, CompanionView, EventPlan, Match, User, UserBlock, UserTagWeight
 from .demo import DEMO_CANDIDATE_ORDER, DEMO_MAX_USER_IDS
-from .onboarding import OnboardingError
+from .errors import UserError
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,9 +73,9 @@ class CompanionRepository:
         """
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id or plan.status != "planned":
-            raise OnboardingError("Этот план уже неактуален")
+            raise UserError("Этот план уже неактуален")
         if plan.company_status != "looking":
-            raise OnboardingError("Включи поиск компании в «Моих планах», чтобы ответить")
+            raise UserError("Включи поиск компании в «Моих планах», чтобы ответить")
         row = (
             await self.session.execute(
                 select(EventPlan, User)
@@ -191,7 +191,7 @@ class CompanionRepository:
     async def react(self, user_id: UUID, candidate_plan_id: UUID, *, liked: bool) -> CompanionReactionResult:
         candidate_plan = await self.session.get(EventPlan, candidate_plan_id)
         if candidate_plan is None:
-            raise OnboardingError("Эта анкета уже недоступна: человек отменил поход или перестал искать компанию")
+            raise UserError("Эта анкета уже недоступна: человек отменил поход или перестал искать компанию")
         owner_plan_id = await self.session.scalar(
             select(EventPlan.id).where(
                 EventPlan.user_id == user_id,
@@ -201,7 +201,7 @@ class CompanionRepository:
             )
         )
         if owner_plan_id is None or owner_plan_id == candidate_plan.id:
-            raise OnboardingError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
+            raise UserError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
 
         # Both reciprocal callbacks lock this same pair in one deterministic order.
         # The second transaction therefore sees the first interest and creates the match.
@@ -216,7 +216,7 @@ class CompanionRepository:
             ).all()
         )
         if len(locked_plans) != 2:
-            raise OnboardingError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
+            raise UserError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
         plans_by_id = {plan.id: plan for plan in locked_plans}
         owner_plan = plans_by_id[owner_plan_id]
         candidate_plan = plans_by_id[candidate_plan.id]
@@ -226,7 +226,7 @@ class CompanionRepository:
             or candidate_plan.status != "planned"
             or candidate_plan.company_status != "looking"
         ):
-            raise OnboardingError("Эта анкета уже недоступна: человек отменил поход или перестал искать компанию")
+            raise UserError("Эта анкета уже недоступна: человек отменил поход или перестал искать компанию")
 
         view = await self.session.scalar(
             select(CompanionView)
@@ -238,7 +238,7 @@ class CompanionRepository:
             .with_for_update()
         )
         if view is None:
-            raise OnboardingError("Сначала открой эту анкету")
+            raise UserError("Сначала открой эту анкету")
         if view.reacted_at is not None:
             return CompanionReactionResult(owner_plan.id, None, was_applied=False, created_match=False)
         view.reacted_at = datetime.now(timezone.utc)
@@ -357,5 +357,5 @@ class CompanionRepository:
     async def _own_looking_plan(self, user_id: UUID, plan_id: UUID) -> EventPlan:
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id or plan.status != "planned" or plan.company_status != "looking":
-            raise OnboardingError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
+            raise UserError("Поиск компании на это событие выключен. Включи его в «Моих планах»")
         return plan

@@ -181,7 +181,6 @@ class MatchContact(UUIDPrimaryKey, Timestamps, Base):
     sender_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     status: Mapped[str] = mapped_column(String(20), server_default="awaiting")
     contact_text: Mapped[str | None] = mapped_column(Text)
-    contact_attachment: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

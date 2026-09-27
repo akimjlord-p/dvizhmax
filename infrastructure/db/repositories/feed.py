@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Place, Tag
 from ..social_models import CompanionInterest, EventPlan, EventReaction, Match, User, UserTagWeight
 from .demo import DEMO_EVENT_ID
-from .onboarding import OnboardingError
+from .errors import UserError
 
 
 LIKE_WEIGHT_DELTA = Decimal("0.1")
@@ -155,12 +155,6 @@ class FeedRepository:
             if event_id in cards_by_id
         ]
 
-    async def liked_card(self, user_id: UUID, event_id: UUID) -> EventCard | None:
-        return next(
-            (card for card in await self.liked_cards(user_id) if card.id == event_id),
-            None,
-        )
-
     async def planned_cards(self, user_id: UUID) -> list[EventCard]:
         user = await self._require_user(user_id)
         plans = list(
@@ -195,11 +189,11 @@ class FeedRepository:
     async def record_reaction(self, user_id: UUID, event_id: UUID, reaction: str) -> bool:
         """Record an event reaction once and report whether this callback changed state."""
         if reaction not in {"like", "skip"}:
-            raise OnboardingError("Неизвестная реакция")
+            raise UserError("Неизвестная реакция")
         user = await self._lock_user(user_id)
         event = await self.session.get(Event, event_id)
         if event is None or event.city_id != user.city_id:
-            raise OnboardingError("Это событие больше недоступно")
+            raise UserError("Это событие больше недоступно")
         inserted = await self.session.scalar(
             insert(EventReaction)
             .values(user_id=user.id, event_id=event_id, reaction=reaction)
@@ -218,7 +212,7 @@ class FeedRepository:
         event = await self.session.get(Event, event_id)
         reaction = await self.session.get(EventReaction, (user.id, event_id))
         if event is None or (event.city_id != user.city_id and (reaction is None or reaction.reaction != "like")):
-            raise OnboardingError("Это событие больше недоступно")
+            raise UserError("Это событие больше недоступно")
         existing = await self.session.scalar(
             select(EventPlan).where(EventPlan.user_id == user.id, EventPlan.event_id == event_id)
         )
@@ -226,12 +220,12 @@ class FeedRepository:
         if existing is not None and existing.status == "planned":
             return WantToGoResult(plan_id=existing.id, was_created=False, company_allowed=company_allowed)
         if existing is not None and existing.status == "completed":
-            raise OnboardingError("Этот план уже завершён")
+            raise UserError("Этот план уже завершён")
         previous = LIKE_WEIGHT_DELTA if reaction is not None and reaction.reaction == "like" else Decimal("0")
         if reaction is None:
             self.session.add(EventReaction(user_id=user.id, event_id=event_id, reaction="like"))
         elif reaction.reaction != "like":
-            raise OnboardingError("Это событие отмечено как «Не моё». Выбери другое в афише")
+            raise UserError("Это событие отмечено как «Не моё». Выбери другое в афише")
         plan = existing or EventPlan(user_id=user.id, event_id=event_id)
         plan.status = "planned"
         plan.company_status = "not_looking"
@@ -259,11 +253,11 @@ class FeedRepository:
         await self._lock_user(user_id)
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id:
-            raise OnboardingError("План недоступен")
+            raise UserError("План недоступен")
         if plan.status == "cancelled":
             return
         if plan.status != "planned":
-            raise OnboardingError("Этот план уже завершён")
+            raise UserError("Этот план уже завершён")
         reaction = await self.session.get(EventReaction, (user_id, plan.event_id))
         remaining = LIKE_WEIGHT_DELTA if reaction is not None and reaction.reaction == "like" else Decimal("0")
         plan.status = "cancelled"
@@ -281,12 +275,12 @@ class FeedRepository:
     async def set_company_search(self, user_id: UUID, plan_id: UUID, *, looking: bool) -> None:
         user = await self._lock_user(user_id)
         if looking and user.profile_status != "active":
-            raise OnboardingError("Для поиска компании сначала заполни анкету")
+            raise UserError("Для поиска компании сначала заполни анкету")
         plan = await self.session.get(EventPlan, plan_id)
         if plan is None or plan.user_id != user_id or plan.status != "planned":
-            raise OnboardingError("Этот план уже неактуален")
+            raise UserError("Этот план уже неактуален")
         if looking and await self._is_for_kids(await self.session.get(Event, plan.event_id)):
-            raise OnboardingError(KIDS_COMPANY_TEXT)
+            raise UserError(KIDS_COMPANY_TEXT)
         plan.company_status = "looking" if looking else "not_looking"
 
     async def _is_for_kids(self, event: Event | None) -> bool:
@@ -296,11 +290,6 @@ class FeedRepository:
             select(EventSource.raw_payload).where(EventSource.event_id == event.id, EventSource.is_primary.is_(True))
         )
         return is_for_kids(event.title, payload)
-
-    async def save_image_attachment(self, image_id: UUID, attachment: dict[str, Any]) -> None:
-        image = await self.session.get(EventImage, image_id)
-        if image is not None:
-            image.max_attachment = attachment
 
     async def _candidate_cards(
         self,
@@ -505,14 +494,14 @@ class FeedRepository:
     async def _require_user(self, user_id: UUID) -> User:
         user = await self.session.get(User, user_id)
         if user is None:
-            raise OnboardingError("Сначала пройди /start")
+            raise UserError("Сначала пройди /start")
         return user
 
     async def _lock_user(self, user_id: UUID) -> User:
         """Serialize state-changing callbacks for one user until the transaction commits."""
         user = await self.session.scalar(select(User).where(User.id == user_id).with_for_update())
         if user is None:
-            raise OnboardingError("Сначала пройди /start")
+            raise UserError("Сначала пройди /start")
         return user
 
 

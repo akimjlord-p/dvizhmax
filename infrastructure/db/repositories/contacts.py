@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -11,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Event
 from ..social_models import Match, MatchContact, User
-from .onboarding import OnboardingError
+from .errors import UserError
 
 
 # A forgotten share request must not swallow unrelated messages forever.
@@ -32,14 +31,12 @@ class PendingContact:
     peer: ContactPeer
     status: str
     contact_text: str | None
-    contact_attachment: dict[str, Any] | None
 
 
 @dataclass(frozen=True, slots=True)
 class SentContact:
     peer: ContactPeer
     contact_text: str
-    contact_attachment: dict[str, Any] | None
     peer_has_shared: bool
 
 
@@ -52,7 +49,7 @@ class ContactRepository:
         peer = await self._peer(user_id, match_id)
         row = await self._row(match_id, user_id, for_update=True)
         if row is not None and row.status == "sent":
-            raise OnboardingError("Контакт по этому мэтчу уже отправлен")
+            raise UserError("Контакт по этому мэтчу уже отправлен")
         await self.session.execute(
             update(MatchContact)
             .where(
@@ -67,7 +64,6 @@ class ContactRepository:
             self.session.add(row)
         row.status = "awaiting"
         row.contact_text = None
-        row.contact_attachment = None
         row.updated_at = datetime.now(timezone.utc)
         await self.session.flush()
         return peer
@@ -84,31 +80,24 @@ class ContactRepository:
             return None
         try:
             peer = await self._peer(user_id, row.match_id)
-        except OnboardingError:
+        except UserError:
             row.status = "cancelled"
             return None
-        return PendingContact(peer, row.status, row.contact_text, row.contact_attachment)
+        return PendingContact(peer, row.status, row.contact_text)
 
-    async def set_contact(
-        self,
-        user_id: UUID,
-        *,
-        contact_text: str,
-        contact_attachment: dict[str, Any] | None,
-    ) -> PendingContact:
+    async def set_contact(self, user_id: UUID, *, contact_text: str) -> PendingContact:
         contact_text = contact_text.strip()
         if not 1 <= len(contact_text) <= 500:
-            raise OnboardingError("Контакт должен быть от 1 до 500 символов")
+            raise UserError("Контакт должен быть от 1 до 500 символов")
         pending = await self.pending(user_id)
         if pending is None:
-            raise OnboardingError("Сначала нажми «Поделиться контактом» в сообщении о мэтче")
+            raise UserError("Сначала нажми «Поделиться контактом» в сообщении о мэтче")
         row = await self._row(pending.peer.match_id, user_id, for_update=True)
         row.status = "confirming"
         row.contact_text = contact_text
-        row.contact_attachment = contact_attachment
         row.updated_at = datetime.now(timezone.utc)
         await self.session.flush()
-        return PendingContact(pending.peer, row.status, contact_text, contact_attachment)
+        return PendingContact(pending.peer, row.status, contact_text)
 
     async def confirm(self, user_id: UUID, match_id: UUID) -> SentContact | None:
         """Mark the contact sent once; ``None`` means it was already sent."""
@@ -117,7 +106,7 @@ class ContactRepository:
         if row is not None and row.status == "sent":
             return None
         if row is None or row.status != "confirming" or not row.contact_text:
-            raise OnboardingError("Контакт не найден. Нажми «Поделиться контактом» ещё раз")
+            raise UserError("Контакт не найден. Нажми «Поделиться контактом» ещё раз")
         row.status = "sent"
         row.sent_at = datetime.now(timezone.utc)
         await self.session.flush()
@@ -128,16 +117,12 @@ class ContactRepository:
                 MatchContact.status == "sent",
             )
         )
-        return SentContact(peer, row.contact_text, row.contact_attachment, peer_has_shared=peer_row is not None)
+        return SentContact(peer, row.contact_text, peer_has_shared=peer_row is not None)
 
     async def cancel(self, user_id: UUID, match_id: UUID) -> None:
         row = await self._row(match_id, user_id, for_update=True)
         if row is not None and row.status in {"awaiting", "confirming"}:
             row.status = "cancelled"
-
-    async def has_sent(self, user_id: UUID, match_id: UUID) -> bool:
-        row = await self._row(match_id, user_id)
-        return row is not None and row.status == "sent"
 
     async def _row(self, match_id: UUID, user_id: UUID, *, for_update: bool = False) -> MatchContact | None:
         query = select(MatchContact).where(MatchContact.match_id == match_id, MatchContact.sender_id == user_id)
@@ -148,9 +133,9 @@ class ContactRepository:
     async def _peer(self, user_id: UUID, match_id: UUID) -> ContactPeer:
         match = await self.session.get(Match, match_id)
         if match is None or user_id not in {match.first_user_id, match.second_user_id}:
-            raise OnboardingError("Мэтч не найден")
+            raise UserError("Мэтч не найден")
         if match.status != "active":
-            raise OnboardingError("Этот мэтч больше не активен: кто-то отменил поход")
+            raise UserError("Этот мэтч больше не активен: кто-то отменил поход")
         peer_id = match.second_user_id if match.first_user_id == user_id else match.first_user_id
         sender, peer = await self.session.get(User, user_id), await self.session.get(User, peer_id)
         event = await self.session.get(Event, match.event_id)

@@ -51,6 +51,9 @@ async def main() -> None:
         if transport == "long_polling":
             await dispatcher.start_polling(bot)
         elif transport == "webhook":
+            if not os.getenv("MAX_WEBHOOK_SECRET", "").strip():
+                # Without the secret anyone could post fake updates on behalf of any user.
+                raise RuntimeError("Set MAX_WEBHOOK_SECRET to run the bot in webhook mode")
             try:
                 await _register_webhook(bot)
             except Exception:

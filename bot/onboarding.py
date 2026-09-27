@@ -13,7 +13,7 @@ from maxapi.types.attachments.attachment import Attachment, OtherAttachmentPaylo
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.models import City, Tag
-from infrastructure.db.repositories import OnboardingError, OnboardingRepository
+from infrastructure.db.repositories import OnboardingRepository, UserError
 from .contacts import handle_contact_message
 from .navigation import menu, menu_rows, report_error
 
@@ -215,12 +215,22 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
             else:
                 await answer(with_notice("Ты уже в ДвижМАКС. Выбирай мероприятия."), attachments=menu())
 
+    async def leave_edit_mode(max_id: int, username: str | None) -> None:
+        uid = await user_id(max_id, username)
+        async with session_factory() as session:
+            await OnboardingRepository(session).leave_edit_mode(uid)
+            await session.commit()
+
     @dispatcher.bot_started()
     async def on_bot_started(event: BotStarted) -> None:
+        await leave_edit_mode(event.user.user_id, event.user.username)
         await resume(event, lambda text, **kwargs: event.bot.send_message(chat_id=event.chat_id, text=text, **kwargs))
 
     @dispatcher.message_created(Command("start"))
     async def on_start(event: MessageCreated) -> None:
+        # /start means "back to the beginning", not "continue the field I was editing".
+        if event.message.sender is not None:
+            await leave_edit_mode(event.message.sender.user_id, event.message.sender.username)
         await resume(event, event.message.answer)
 
     @dispatcher.message_created(Command("profile"))
@@ -276,7 +286,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 async with session_factory() as session:
                     city = await session.get(City, UUID(value))
                     if city is None or city.name != MVP_CITY_NAME:
-                        raise OnboardingError("На этапе MVP ДвижМАКС работает в Москве")
+                        raise UserError("На этапе MVP ДвижМАКС работает в Москве")
                     await OnboardingRepository(session).choose_city(uid, city.id)
                     await session.commit()
                 await resume(event, event.edit)
@@ -339,7 +349,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                     tags, selected = await repo.list_interest_tags(), await repo.selected_interest_ids(uid)
                 group_tags = _group_tags(tags, value)
                 if not group_tags:
-                    raise OnboardingError("В этом разделе пока нет интересов")
+                    raise UserError("В этом разделе пока нет интересов")
                 name = next((group[1] for group in GROUPS if group[0] == value), "Другое")
                 await event.edit(f"{name}\n\nВыбирай интересы. Отмечено всего: {len(selected)}.", attachments=interests_keyboard(tags, selected, value))
                 return
@@ -358,7 +368,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                 code = next((group[0] for group in GROUPS if any(tag.id == tag_id and tag.code in group[2] for tag in tags)), "other")
                 name = next((group[1] for group in GROUPS if group[0] == code), "Другое")
                 await event.edit(f"{name}\n\nВыбирай интересы. Отмечено всего: {len(selected)}.", attachments=interests_keyboard(tags, selected, code))
-        except (OnboardingError, ValueError) as exc:
+        except UserError as exc:
             await event.ack(str(exc))
         except Exception:
             LOGGER.exception("Onboarding callback %r failed", event.callback.payload)
@@ -383,7 +393,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                     await repo.set_name(uid, text)
                 elif step == "age":
                     if not text.isdecimal():
-                        raise OnboardingError("Укажи возраст числом от 18 до 120")
+                        raise UserError("Укажи возраст числом от 18 до 120")
                     await repo.set_age(uid, int(text))
                 elif step == "description":
                     await repo.set_description(uid, text)
@@ -407,7 +417,7 @@ def register_onboarding_handlers(dispatcher: Dispatcher, session_factory: async_
                     unexpected_step = step
                 if unexpected_step is None:
                     await session.commit()
-            except (OnboardingError, ValueError) as exc:
+            except UserError as exc:
                 await session.rollback()
                 await event.message.answer(str(exc))
                 return

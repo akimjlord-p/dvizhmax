@@ -50,6 +50,10 @@ class SchemaRecorder:
     def add_column(self, table_name, column):
         self.metadata.tables[table_name].append_column(column)
 
+    def drop_column(self, table_name, column_name):
+        table = self.metadata.tables[table_name]
+        table._columns.remove(table.c[column_name])
+
     def execute(self, statement):
         # Data migration behavior is exercised against PostgreSQL separately.
         pass

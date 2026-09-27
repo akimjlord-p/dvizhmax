@@ -4,12 +4,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-import httpx
 from maxapi import Bot, Dispatcher, F
 from maxapi.enums import AttachmentType, UploadType
 from maxapi.exceptions.max import MaxApiError
@@ -19,14 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from integrations.kudago import format_price_text
 from infrastructure.cache.feed_buffer import FeedBufferStore
-from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingError, OnboardingRepository
+from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, OnboardingRepository, UserError
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID
 from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT, EventCard
 from infrastructure.db.social_models import EventPlan
 from .navigation import menu, menu_rows, plans_and_feed, profile_offer, report_error
 from .notifications import send_match_notifications
 
-MAX_EVENT_IMAGE_BYTES = 5 * 1024 * 1024
 FEED_BUFFER_SIZE = 6
 # Start the next query immediately after the fifth card of a six-card page.
 FEED_REFILL_TRIGGER_REMAINING = 1
@@ -122,36 +121,28 @@ def _without_buttons(attachments: list | None, payloads: set[str]) -> list:
     return result
 
 
+def _local(moment: datetime, timezone_name: str) -> datetime:
+    """Event time in the city's timezone; an unknown zone falls back to the stored time."""
+    try:
+        return moment.astimezone(ZoneInfo(timezone_name))
+    except Exception:
+        return moment
+
+
 def card_text(card: EventCard) -> str:
     parts = [card.title]
+    zone = card.city_timezone
     if card.schedule_state == "ongoing":
         if card.ends_at is not None:
-            try:
-                local_end = card.ends_at.astimezone(ZoneInfo(card.city_timezone))
-            except Exception:
-                local_end = card.ends_at
-            parts.append(f"🗓 Идёт сейчас · до {local_end:%d.%m.%Y %H:%M}")
+            parts.append(f"🗓 Идёт сейчас · до {_local(card.ends_at, zone):%d.%m.%Y %H:%M}")
         else:
             parts.append("🗓 Идёт сейчас")
     elif card.schedule_state == "recurring" and card.starts_at is not None:
-        try:
-            local = card.starts_at.astimezone(ZoneInfo(card.city_timezone))
-        except Exception:
-            local = card.starts_at
-        parts.append(f"🗓 Ближайший сеанс: {local:%d.%m.%Y %H:%M}")
+        parts.append(f"🗓 Ближайший сеанс: {_local(card.starts_at, zone):%d.%m.%Y %H:%M}")
     elif card.schedule_state == "period" and card.starts_at is not None and card.ends_at is not None:
-        try:
-            local_start = card.starts_at.astimezone(ZoneInfo(card.city_timezone))
-            local_end = card.ends_at.astimezone(ZoneInfo(card.city_timezone))
-        except Exception:
-            local_start, local_end = card.starts_at, card.ends_at
-        parts.append(f"🗓 Период: {local_start:%d.%m.%Y} — {local_end:%d.%m.%Y}")
+        parts.append(f"🗓 Период: {_local(card.starts_at, zone):%d.%m.%Y} — {_local(card.ends_at, zone):%d.%m.%Y}")
     elif card.starts_at is not None:
-        try:
-            local = card.starts_at.astimezone(ZoneInfo(card.city_timezone))
-        except Exception:
-            local = card.starts_at
-        parts.append(f"🗓 {local:%d.%m.%Y %H:%M}")
+        parts.append(f"🗓 {_local(card.starts_at, zone):%d.%m.%Y %H:%M}")
     if card.place_name:
         place = card.place_name
         if card.place_address:
@@ -166,22 +157,6 @@ def card_text(card: EventCard) -> str:
     if card.data_status == "uncertain":
         parts.append("⚠️ Информация могла измениться. Проверь дату и условия у источника.")
     return "\n\n".join(parts)
-
-
-async def _image_attachment(image_url: str | None) -> InputMediaBuffer | None:
-    if not image_url:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            response = await client.get(image_url)
-            response.raise_for_status()
-            content = response.content
-        if not content or len(content) > MAX_EVENT_IMAGE_BYTES:
-            return None
-        filename = Path(urlparse(image_url).path).name or "image.jpg"
-        return InputMediaBuffer(buffer=content, filename=filename, type=UploadType.IMAGE)
-    except httpx.HTTPError:
-        return None
 
 
 async def _profile_image_attachment(
@@ -399,7 +374,7 @@ def register_feed_handlers(
             await show_next(answer, user_id, bot)
             return
         if mode not in {"liked", "plans"}:
-            raise OnboardingError("Неизвестный раздел")
+            raise UserError("Неизвестный раздел")
         async with session_factory() as session:
             repository = FeedRepository(session)
             cards = await repository.liked_cards(user_id) if mode == "liked" else await repository.planned_cards(user_id)
@@ -502,49 +477,35 @@ def register_feed_handlers(
             ],
         )
 
-    @dispatcher.message_created(Command("feed"))
-    async def on_feed(event: MessageCreated) -> None:
+    async def started_user(event: MessageCreated) -> UUID | None:
+        """The sender's id once onboarding reached the feed; otherwise point to /start."""
         sender = event.message.sender
         if sender is None:
-            return
+            return None
         user_id = await user_uuid(sender.user_id)
         if user_id is None:
             await event.message.answer("Сначала пройди старт: /start")
-            return
-        await show_next(event.message.answer, user_id, event.bot)
+        return user_id
+
+    @dispatcher.message_created(Command("feed"))
+    async def on_feed(event: MessageCreated) -> None:
+        if user_id := await started_user(event):
+            await show_next(event.message.answer, user_id, event.bot)
 
     @dispatcher.message_created(Command("liked"))
     async def on_liked(event: MessageCreated) -> None:
-        sender = event.message.sender
-        if sender is None:
-            return
-        user_id = await user_uuid(sender.user_id)
-        if user_id is None:
-            await event.message.answer("Сначала пройди старт: /start")
-            return
-        await browse(event.message.answer, user_id, event.bot, "liked")
+        if user_id := await started_user(event):
+            await browse(event.message.answer, user_id, event.bot, "liked")
 
     @dispatcher.message_created(Command("plans"))
     async def on_plans(event: MessageCreated) -> None:
-        sender = event.message.sender
-        if sender is None:
-            return
-        user_id = await user_uuid(sender.user_id)
-        if user_id is None:
-            await event.message.answer("Сначала пройди старт: /start")
-            return
-        await browse(event.message.answer, user_id, event.bot, "plans")
+        if user_id := await started_user(event):
+            await browse(event.message.answer, user_id, event.bot, "plans")
 
     @dispatcher.message_created(Command("demo"))
     async def on_demo(event: MessageCreated) -> None:
-        sender = event.message.sender
-        if sender is None:
-            return
-        user_id = await user_uuid(sender.user_id)
-        if user_id is None:
-            await event.message.answer("Сначала пройди старт: /start")
-            return
-        await start_demo(event.message.answer, sender.user_id, user_id, event.bot)
+        if user_id := await started_user(event):
+            await start_demo(event.message.answer, event.message.sender.user_id, user_id, event.bot)
 
     async def start_demo(answer, max_user_id: int, user_id: UUID, bot: Bot) -> None:
         user = await current_user(max_user_id)
@@ -686,7 +647,7 @@ def register_feed_handlers(
                 choice, plan_raw = values[:2]
                 mode, index = (values[2], int(values[3])) if len(values) == 4 else ("plans", 0)
                 if choice not in {"yes", "no"}:
-                    raise OnboardingError("Неизвестный вариант ответа")
+                    raise UserError("Неизвестный вариант ответа")
                 user = await current_user(event.callback.user.user_id)
                 if choice == "yes" and user.profile_status != "active":
                     await edit_current("План сохранён. Для поиска компании нужна анкета. Хочешь её создать?",
@@ -734,7 +695,7 @@ def register_feed_handlers(
             elif action == "liked":
                 # Old messages remain navigable after deploying the card browser.
                 await browse(send_next_card, user_id, event.bot, "liked")
-        except (OnboardingError, ValueError) as exc:
+        except UserError as exc:
             await event.ack(str(exc))
         except Exception:
             LOGGER.exception("Feed callback %r failed", event.callback.payload)

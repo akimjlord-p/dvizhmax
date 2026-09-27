@@ -10,7 +10,7 @@ import asyncio
 import copy
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, AsyncIterator, Iterable
 from uuid import UUID

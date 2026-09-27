@@ -25,7 +25,7 @@ from bot.contacts import register_contact_handlers
 from bot.feed import register_feed_handlers
 from bot.onboarding import CONSENT_VERSION, register_onboarding_handlers
 from infrastructure.db.models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Tag
-from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, NotificationRepository, OnboardingRepository, OnboardingError
+from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, NotificationRepository, OnboardingRepository, UserError
 from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_EVENT_ID, DEMO_MAX_USER_ID, DEMO_MAX_USER_IDS
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact, User, UserTagWeight
 from bot.feed import DEMO_RESET_PAYLOAD, NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
@@ -430,6 +430,41 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             row = await session.scalar(select(MatchContact).where(MatchContact.match_id == match_id))
             self.assertEqual(row.status, "sent")
 
+    async def test_section_commands_require_start_and_open_the_section(self):
+        for text, max_id, expected in (
+            ("/liked", 999, "Сначала пройди старт: /start"),
+            ("/plans", 100, "Мои планы: пока пусто"),
+            ("/liked", 100, "Понравившиеся: пока пусто"),
+            ("/feed", 100, "Новых событий пока нет"),
+        ):
+            with self.subTest(command=text, user=max_id):
+                event_message = message(text, max_id)
+                handler = await select_handler(self.dispatcher, event_message)
+                with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
+                    await handler(event_message)
+                self.assertIn(expected, answer.call_args.args[0])
+
+    async def test_internal_error_text_is_never_shown_to_the_user(self):
+        callback_event = callback("feed:like:not-a-uuid", 100)
+        handler = await select_handler(self.dispatcher, callback_event)
+        callback_event.bot = SimpleNamespace(me=None, send_message=AsyncMock())
+        with patch.object(MessageCallback, "ack", new=AsyncMock(side_effect=strict_ack)) as ack:
+            await handler(callback_event)
+        self.assertNotIn("hexadecimal", str(ack.await_args_list))
+        self.assertEqual(callback_event.bot.send_message.await_args.kwargs["text"], ERROR_TEXT)
+
+    async def test_start_during_profile_edit_shows_the_profile_not_the_field_question(self):
+        await self.click("onboarding:edit:name")
+        event_message = message("/start", 100)
+        handler = await select_handler(self.dispatcher, event_message)
+        with patch.object(type(event_message.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(event_message)
+        self.assertIn("Твоя анкета", answer.call_args.args[0])
+        self.assertNotIn("Как тебя зовут", answer.call_args.args[0])
+        async with self.factory() as session:
+            user = await session.get(User, self.user.id)
+            self.assertEqual((user.name, user.onboarding_step), ("Alice", "complete"))
+
     async def test_leaving_profile_edit_through_the_menu_does_not_overwrite_the_field(self):
         await self.event("Some event")
         await self.click("onboarding:edit:name")
@@ -471,7 +506,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("feed:company:yes", " ".join(payloads(edit.call_args.kwargs["attachments"])))
         async with self.factory() as session:
             plan = await session.scalar(select(EventPlan).where(EventPlan.user_id == self.user.id))
-            with self.assertRaisesRegex(OnboardingError, KIDS_COMPANY_TEXT):
+            with self.assertRaisesRegex(UserError, KIDS_COMPANY_TEXT):
                 await FeedRepository(session).set_company_search(self.user.id, plan.id, looking=True)
             [card] = await FeedRepository(session).planned_cards(self.user.id)
         self.assertTrue(card.for_kids)
@@ -990,7 +1025,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             repo = FeedRepository(session)
             plan = await repo.want_to_go(self.other.id, event.id)
-            with self.assertRaises(OnboardingError):
+            with self.assertRaises(UserError):
                 await repo.cancel_plan(self.user.id, plan.plan_id)
             self.assertEqual((await session.get(EventPlan, plan.plan_id)).status, "planned")
 
