@@ -11,6 +11,7 @@ from maxapi.enums import UpdateType
 
 from bot.contacts import register_contact_handlers
 from bot.feed import register_feed_handlers
+from bot.navigation import register_unknown_command_handler
 from bot.notifications import run_interest_digest_loop
 from bot.onboarding import register_onboarding_handlers
 from infrastructure.db.session import create_async_database_engine, create_session_factory
@@ -41,6 +42,7 @@ async def main() -> None:
     register_onboarding_handlers(dispatcher, session_factory)
     register_feed_handlers(dispatcher, session_factory)
     register_contact_handlers(dispatcher, session_factory)
+    register_unknown_command_handler(dispatcher)
     interest_digest_task = asyncio.create_task(
         run_interest_digest_loop(bot, session_factory),
         name="interest-digest",

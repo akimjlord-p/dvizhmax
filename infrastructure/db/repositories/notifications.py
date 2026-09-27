@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -21,6 +21,8 @@ class MatchRecipients:
     first_name: str
     second_max_user_id: int
     second_name: str
+    first_notified: bool = False
+    second_notified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,8 @@ class NotificationRepository:
                     first_user.name.label("first_name"),
                     second_user.max_user_id.label("second_max_user_id"),
                     second_user.name.label("second_name"),
+                    Match.first_notified_at,
+                    Match.second_notified_at,
                 )
                 .select_from(Match)
                 .join(Event, Event.id == Match.event_id)
@@ -64,7 +68,48 @@ class NotificationRepository:
             first_name=row.first_name or "Пользователь",
             second_max_user_id=row.second_max_user_id,
             second_name=row.second_name or "Пользователь",
+            first_notified=row.first_notified_at is not None,
+            second_notified=row.second_notified_at is not None,
         )
+
+    async def start_match_delivery(self, match_id: UUID) -> None:
+        """Record an attempt before sending, so the retry loop does not send in parallel."""
+        await self.session.execute(
+            update(Match)
+            .where(Match.id == match_id)
+            .values(notify_attempts=Match.notify_attempts + 1, last_notify_attempt_at=func.now())
+        )
+
+    async def record_match_delivery(self, match_id: UUID, *, first: bool, second: bool) -> None:
+        values = {}
+        if first:
+            values["first_notified_at"] = func.now()
+        if second:
+            values["second_notified_at"] = func.now()
+        if values:
+            await self.session.execute(update(Match).where(Match.id == match_id).values(**values))
+
+    async def undelivered_match_ids(self, *, max_attempts: int, retry_after: timedelta) -> list[UUID]:
+        """Active matches whose message has not reached a real participant yet."""
+        first_user = aliased(User)
+        second_user = aliased(User)
+        return list((await self.session.scalars(
+            select(Match.id)
+            .join(first_user, first_user.id == Match.first_user_id)
+            .join(second_user, second_user.id == Match.second_user_id)
+            .where(
+                Match.status == "active",
+                Match.notify_attempts < max_attempts,
+                or_(
+                    Match.last_notify_attempt_at.is_(None),
+                    Match.last_notify_attempt_at < datetime.now(timezone.utc) - retry_after,
+                ),
+                or_(
+                    (Match.first_notified_at.is_(None)) & first_user.max_user_id.not_in(DEMO_MAX_USER_IDS),
+                    (Match.second_notified_at.is_(None)) & second_user.max_user_id.not_in(DEMO_MAX_USER_IDS),
+                ),
+            )
+        )).all())
 
     async def unannounced_interest_digests(self) -> list[InterestDigest]:
         recipient_plan = aliased(EventPlan)

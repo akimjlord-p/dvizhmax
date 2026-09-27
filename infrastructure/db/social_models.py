@@ -159,6 +159,11 @@ class Match(UUIDPrimaryKey, Base):
     second_user_id: Mapped[UUID] = mapped_column()
     status: Mapped[str] = mapped_column(String(10), server_default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Delivery of the "Есть мэтч" message to each side; failed sends are retried.
+    first_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    second_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notify_attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    last_notify_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MatchContact(UUIDPrimaryKey, Timestamps, Base):

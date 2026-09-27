@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from uuid import UUID
 
 from maxapi import Bot
@@ -16,6 +17,9 @@ from .navigation import menu_rows
 
 LOGGER = logging.getLogger(__name__)
 INTEREST_DIGEST_INTERVAL_SECONDS = 60
+# A match message that failed is retried by the same loop, up to 10 times.
+MATCH_NOTIFY_MAX_ATTEMPTS = 10
+MATCH_NOTIFY_RETRY_AFTER = timedelta(seconds=30)
 def _people(count: int) -> str:
     """Russian agreement: 1 человек хочет, 2 человека хотят, 5 человек хотят."""
     if count % 10 == 1 and count % 100 != 11:
@@ -59,32 +63,55 @@ async def send_match_notifications(
     session_factory: async_sessionmaker[AsyncSession],
     match_id: UUID,
 ) -> None:
+    """Send "Есть мэтч" to every real participant who has not received it yet."""
     async with session_factory() as session:
-        recipients = await NotificationRepository(session).match_recipients(match_id)
-    if recipients is None:
-        return
-    await _send_match_messages(bot, recipients, match_id)
+        repo = NotificationRepository(session)
+        recipients = await repo.match_recipients(match_id)
+        if recipients is None:
+            return
+        await repo.start_match_delivery(match_id)
+        await session.commit()
+    first, second = await _send_match_messages(bot, recipients, match_id)
+    async with session_factory() as session:
+        await NotificationRepository(session).record_match_delivery(match_id, first=first, second=second)
+        await session.commit()
 
 
-async def _send_match_messages(bot: Bot, recipients: MatchRecipients, match_id: UUID) -> None:
-    messages = []
-    if recipients.first_max_user_id not in DEMO_MAX_USER_IDS:
-        messages.append((
-            recipients.first_max_user_id,
-            match_message(event_title=recipients.event_title, peer_name=recipients.second_name),
-        ))
-    if recipients.second_max_user_id not in DEMO_MAX_USER_IDS:
-        messages.append((
-            recipients.second_max_user_id,
-            match_message(event_title=recipients.event_title, peer_name=recipients.first_name),
-        ))
-    results = await asyncio.gather(*(
-        bot.send_message(user_id=user_id, text=text, attachments=match_attachments(match_id))
-        for user_id, text in messages
-    ), return_exceptions=True)
-    for (recipient_max_user_id, _), result in zip(messages, results, strict=True):
-        if isinstance(result, Exception):
-            LOGGER.warning("Could not send match notification to MAX user %s: %s", recipient_max_user_id, result)
+async def _send_match_messages(bot: Bot, recipients: MatchRecipients, match_id: UUID) -> tuple[bool, bool]:
+    """Return whether each side now has the message; demo profiles count as delivered."""
+    sides = (
+        (recipients.first_notified, recipients.first_max_user_id, recipients.second_name),
+        (recipients.second_notified, recipients.second_max_user_id, recipients.first_name),
+    )
+    delivered = []
+    for already_sent, user_id, peer_name in sides:
+        if already_sent or user_id in DEMO_MAX_USER_IDS:
+            delivered.append(True)
+            continue
+        try:
+            await bot.send_message(
+                user_id=user_id,
+                text=match_message(event_title=recipients.event_title, peer_name=peer_name),
+                attachments=match_attachments(match_id),
+            )
+            delivered.append(True)
+        except Exception as exc:
+            LOGGER.warning("Could not send match notification to MAX user %s: %s", user_id, exc)
+            delivered.append(False)
+    return delivered[0], delivered[1]
+
+
+async def retry_match_notifications_once(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        match_ids = await NotificationRepository(session).undelivered_match_ids(
+            max_attempts=MATCH_NOTIFY_MAX_ATTEMPTS,
+            retry_after=MATCH_NOTIFY_RETRY_AFTER,
+        )
+    for match_id in match_ids:
+        await send_match_notifications(bot, session_factory, match_id)
 
 
 async def dispatch_interest_digests_once(
@@ -116,10 +143,11 @@ async def run_interest_digest_loop(
     interval_seconds: int = INTEREST_DIGEST_INTERVAL_SECONDS,
 ) -> None:
     while True:
-        try:
-            await dispatch_interest_digests_once(bot, session_factory)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOGGER.exception("Interest digest run failed")
+        for job in (retry_match_notifications_once, dispatch_interest_digests_once):
+            try:
+                await job(bot, session_factory)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("%s failed", job.__name__)
         await asyncio.sleep(interval_seconds)

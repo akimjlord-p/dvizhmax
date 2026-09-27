@@ -30,6 +30,7 @@ from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_EVENT_ID
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact, User, UserTagWeight
 from bot.feed import DEMO_RESET_PAYLOAD, NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
 from bot.onboarding import PHOTO_NOT_RECOGNIZED
+from bot.notifications import retry_match_notifications_once, send_match_notifications
 from workers.demo_seed import _seed_profiles
 from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT
 from bot.navigation import ERROR_TEXT, MENU_PAYLOAD
@@ -354,6 +355,41 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(type(event.message), "answer", new_callable=AsyncMock) as answer:
             await handler(event)
         return answer
+
+    async def test_failed_match_message_is_retried_only_for_the_missing_side(self):
+        match_id = await self.matched_pair("Retry match")
+
+        async def flaky_send(*, user_id, **kwargs):
+            if user_id == 100:
+                raise RuntimeError("MAX unavailable")
+
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=flaky_send))
+        await send_match_notifications(bot, self.factory, match_id)
+        async with self.factory() as session:
+            match = await session.get(Match, match_id)
+            self.assertIsNone(match.first_notified_at if self.user.id == match.first_user_id else match.second_notified_at)
+            self.assertEqual(match.notify_attempts, 1)
+            # Let the retry window pass.
+            match.last_notify_attempt_at = match.last_notify_attempt_at - timedelta(minutes=1)
+            await session.commit()
+
+        bot = SimpleNamespace(send_message=AsyncMock())
+        await retry_match_notifications_once(bot, self.factory)
+        self.assertEqual([call.kwargs["user_id"] for call in bot.send_message.await_args_list], [100])
+        await retry_match_notifications_once(bot, self.factory)
+        self.assertEqual(bot.send_message.await_count, 1)
+        async with self.factory() as session:
+            match = await session.get(Match, match_id)
+            self.assertIsNotNone(match.first_notified_at)
+            self.assertIsNotNone(match.second_notified_at)
+
+    async def test_fresh_match_is_left_to_the_callback_before_retrying(self):
+        match_id = await self.matched_pair("Fresh match")
+        bot = SimpleNamespace(send_message=AsyncMock())
+        await retry_match_notifications_once(bot, self.factory)
+        bot.send_message.assert_not_awaited()
+        async with self.factory() as session:
+            self.assertEqual((await session.get(Match, match_id)).notify_attempts, 0)
 
     async def test_match_contact_is_typed_confirmed_and_delivered(self):
         match_id = await self.matched_pair()

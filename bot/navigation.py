@@ -1,5 +1,6 @@
 """Shared inline navigation, independent of handler registration order."""
-from maxapi.types import ButtonsPayload, CallbackButton
+from maxapi import F
+from maxapi.types import ButtonsPayload, CallbackButton, MessageCreated
 
 
 def menu_rows() -> list[list[CallbackButton]]:
@@ -57,3 +58,16 @@ def profile_offer() -> list:
         [CallbackButton(text="Создать / продолжить профиль", payload="onboarding:profile:create")],
         [CallbackButton(text="Пока нет, к планам", payload="feed:browse:plans|0")],
     ]).pack()]
+
+
+UNKNOWN_COMMAND_TEXT = (
+    "Не знаю такую команду. Доступны /start, /feed, /liked, /plans, /profile и /demo "
+    "— или выбери раздел ниже."
+)
+
+
+def register_unknown_command_handler(dispatcher) -> None:
+    """Register last: known commands are matched by their own handlers first."""
+    @dispatcher.message_created(F.message.body.text.regexp(r"^\s*/"))
+    async def on_unknown_command(event: MessageCreated) -> None:
+        await event.message.answer(UNKNOWN_COMMAND_TEXT, attachments=menu())

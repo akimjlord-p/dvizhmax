@@ -7,6 +7,7 @@ from maxapi import Dispatcher
 from maxapi.types import MessageCallback, MessageCreated
 
 from bot.feed import register_feed_handlers
+from bot.navigation import register_unknown_command_handler
 from bot.onboarding import register_onboarding_handlers
 
 
@@ -46,11 +47,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = Dispatcher()
         register_onboarding_handlers(dispatcher, None)
         register_feed_handlers(dispatcher, None)
+        register_unknown_command_handler(dispatcher)
         cases = [
             (message("/feed"), "on_feed"), (message("/liked"), "on_liked"),
             (message("/plans"), "on_plans"), (message("/start"), "on_start"),
             (message("/profile"), "on_profile"), (message("Alice"), "on_message"),
             (message(None), "on_message"),
+            (message("/strat"), "on_unknown_command"), (message("/demo"), "on_demo"),
             (callback("feed:like:123"), "on_feed_callback"),
             (callback("onboarding:profile:create"), "on_callback"),
             (callback("other:payload"), None), (callback(None), None),

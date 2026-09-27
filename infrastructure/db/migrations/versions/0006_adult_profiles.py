@@ -12,7 +12,10 @@ depends_on = None
 def upgrade() -> None:
     # Existing underage profiles become hidden and must pass the updated
     # onboarding age step before they can search for company again.
-    op.execute("UPDATE users SET profile_status = 'hidden', onboarding_step = 'age' WHERE age IS NOT NULL AND age < 18")
+    op.execute(
+        "UPDATE users SET profile_status = 'hidden', onboarding_step = 'age', age = NULL "
+        "WHERE age IS NOT NULL AND age < 18"
+    )
     op.drop_constraint(op.f("ck_users_age_range"), "users", type_="check")
     op.create_check_constraint(op.f("ck_users_age_range"), "users", "age BETWEEN 18 AND 120")
 

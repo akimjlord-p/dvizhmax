@@ -286,6 +286,9 @@ class CompanionRepository:
             reopened = match.status == "closed"
             if reopened:
                 match.status = "active"
+                match.first_notified_at = match.second_notified_at = None
+                match.notify_attempts = 0
+                match.last_notify_attempt_at = datetime.now(timezone.utc)
             return CompanionReactionResult(owner_plan.id, match.id, was_applied=True, created_match=reopened)
 
         match_id = await self.session.scalar(
@@ -294,6 +297,7 @@ class CompanionRepository:
                 event_id=candidate_plan.event_id,
                 first_user_id=first_id,
                 second_user_id=second_id,
+                last_notify_attempt_at=func.now(),
             )
             .on_conflict_do_nothing(
                 index_elements=(Match.event_id, Match.first_user_id, Match.second_user_id)
