@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from infrastructure.db.repositories import CatalogRepository
 from infrastructure.db.session import create_async_database_engine, create_session_factory
 from integrations.kudago import KudaGoClient, normalize_event
+from workers.demo_seed import seed_demo
 from integrations.yandex_tagger import PRIMARY_TAGS, SECONDARY_TAGS, YandexTagger
 from integrations.yandex_tagger import _TAG_LABELS as TAG_LABELS
 
@@ -176,6 +177,17 @@ async def run_once(
     return created, updated, failed
 
 
+async def refresh_demo(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Keep the /demo event ready without a manual step; it also moves a week ahead each cycle."""
+    try:
+        async with session_factory() as session:
+            await CatalogRepository(session).ensure_tags(_tag_definitions())
+            await session.commit()
+        await seed_demo(session_factory)
+    except Exception:
+        LOGGER.exception("Demo data refresh failed")
+
+
 async def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = CatalogWorkerSettings.from_env()
@@ -183,6 +195,7 @@ async def main() -> None:
     session_factory = create_session_factory(engine)
     try:
         while True:
+            await refresh_demo(session_factory)
             created = updated = failed = 0
             for city_settings in settings.cities:
                 try:

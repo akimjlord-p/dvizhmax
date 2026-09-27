@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from sqlalchemy import or_, select, update
 
 from infrastructure.db.models import City, Event, EventSchedule, EventSource, EventTag, Tag
+from infrastructure.db.repositories import CatalogRepository
 from infrastructure.db.repositories.demo import DEMO_EVENT_ID, DEMO_PROFILES
 from infrastructure.db.session import create_async_database_engine, create_session_factory
 from infrastructure.db.social_models import CompanionInterest, EventPlan, Match, User, UserTagWeight
@@ -198,21 +199,30 @@ async def _seed_team_profiles(session, event: Event) -> int:
     return len(users)
 
 
+async def seed_demo(session_factory) -> int:
+    """Create or refresh the /demo event and profiles; safe to run repeatedly.
+
+    Returns the number of team profiles put on the demo event.
+    """
+    async with session_factory() as session:
+        # Same key as the catalog worker uses for Moscow, so no second city appears.
+        city = await CatalogRepository(session).ensure_city(
+            name="Москва", timezone_name="Europe/Moscow", source="kudago", source_code="msk",
+        )
+        event = await _demo_event(session, city)
+        await _seed_profiles(session, event)
+        await _detach_demo_from_other_events(session)
+        team_profiles = await _seed_team_profiles(session, event)
+        await session.commit()
+        return team_profiles
+
+
 async def main() -> None:
     load_dotenv()
     engine = create_async_database_engine()
-    factory = create_session_factory(engine)
     try:
-        async with factory() as session:
-            city = await session.scalar(select(City).where(City.name == "Москва").limit(1))
-            if city is None:
-                raise RuntimeError("Сначала загрузите каталог Москвы")
-            event = await _demo_event(session, city)
-            await _seed_profiles(session, event)
-            await _detach_demo_from_other_events(session)
-            team_profiles = await _seed_team_profiles(session, event)
-            await session.commit()
-            print(f"Fixed demo match is ready for event {event.id}; team profiles={team_profiles}")
+        team_profiles = await seed_demo(create_session_factory(engine))
+        print(f"Fixed demo match is ready for event {DEMO_EVENT_ID}; team profiles={team_profiles}")
     finally:
         await engine.dispose()
 

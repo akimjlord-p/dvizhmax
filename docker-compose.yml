@@ -1,16 +1,15 @@
-# Base stack. `docker compose up -d --build` builds the app image once, applies
-# migrations and (re)starts the bot and the catalog worker.
-# Delivery mode is chosen by .env (MAX_TRANSPORT) or an override file:
-#   docker-compose.polling.yml — long polling, no domain needed
-#   docker-compose.webhook.yml — webhook behind Caddy with automatic HTTPS
-# Without an override the bot publishes 127.0.0.1:8080 for nginx on the host.
+# `docker compose up -d --build` starts everything: PostgreSQL, Redis, migrations,
+# the bot and the catalog worker. Settings come from .env (see .env.example).
 
-# Every app service runs the same image. Only the bot builds it: several builds of
-# one tag in parallel conflict. The others never pull it from a registry.
 x-app: &app
+  # One image for every app process. Only the bot builds it: parallel builds of
+  # one tag conflict, so the other services never build or pull it.
   image: dvizhmax-app:${IMAGE_TAG:-latest}
   pull_policy: never
   env_file: .env
+  environment:
+    DATABASE_URL: postgresql+psycopg://dvizhmax:${POSTGRES_PASSWORD:-dvizhmax}@postgres:5432/dvizhmax
+    REDIS_URL: redis://redis:6379/0
 
 x-after-migrate: &after-migrate
   postgres:
@@ -24,7 +23,7 @@ services:
     environment:
       POSTGRES_DB: dvizhmax
       POSTGRES_USER: dvizhmax
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dvizhmax}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -59,6 +58,7 @@ services:
     build: .
     pull_policy: build
     command: ["python", "-m", "bot.main"]
+    # Webhook port for a reverse proxy on the same host; unused in long polling.
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -73,13 +73,7 @@ services:
     depends_on: *after-migrate
     restart: unless-stopped
 
-  demo-seed:
-    <<: *app
-    command: ["python", "-m", "workers.demo_seed"]
-    depends_on: *after-migrate
-    profiles: ["tools"]
-    restart: "no"
-
+  # Maintenance commands: docker compose run --rm <name>
   demo-reset:
     <<: *app
     command: ["python", "-m", "workers.reset_demo"]
