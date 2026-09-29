@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
@@ -20,17 +19,6 @@ from infrastructure.db.social_models import CompanionInterest, EventPlan, Match,
 
 DEMO_SOURCE = "dvizhmax_demo"
 DEMO_SOURCE_ID = "match-flow-v1"
-
-
-def _team_demo_user_ids() -> tuple[int, ...]:
-    """Read real team profiles that should participate in the fixed demo."""
-    raw_ids = os.getenv("DEMO_TEAM_MAX_USER_IDS", "")
-    values = [value.strip() for value in raw_ids.split(",") if value.strip()]
-    try:
-        return tuple(dict.fromkeys(int(value) for value in values))
-    except ValueError as exc:
-        raise ValueError("DEMO_TEAM_MAX_USER_IDS must be a comma-separated list of MAX user IDs") from exc
-
 
 async def _meeting_tag(session) -> Tag:
     tag = await session.scalar(select(Tag).where(Tag.code == "meetup"))
@@ -176,34 +164,8 @@ async def _detach_demo_from_other_events(session) -> None:
     )
 
 
-async def _seed_team_profiles(session, event: Event) -> int:
-    """Add opted-in team profiles to the fixed demo event as real candidates."""
-    max_user_ids = _team_demo_user_ids()
-    if not max_user_ids:
-        return 0
-    users = list((await session.scalars(select(User).where(
-        User.max_user_id.in_(max_user_ids),
-        User.profile_status == "active",
-        User.onboarding_step == "complete",
-    ))).all())
-    for user in users:
-        plan = await session.scalar(select(EventPlan).where(
-            EventPlan.user_id == user.id,
-            EventPlan.event_id == event.id,
-        ))
-        if plan is None:
-            plan = EventPlan(user_id=user.id, event_id=event.id)
-            session.add(plan)
-        plan.status = "planned"
-        plan.company_status = "looking"
-    return len(users)
-
-
-async def seed_demo(session_factory) -> int:
-    """Create or refresh the /demo event and profiles; safe to run repeatedly.
-
-    Returns the number of team profiles put on the demo event.
-    """
+async def seed_demo(session_factory) -> None:
+    """Create or refresh the fixed /demo event and fake profiles without duplicates."""
     async with session_factory() as session:
         # Same key as the catalog worker uses for Moscow, so no second city appears.
         city = await CatalogRepository(session).ensure_city(
@@ -212,17 +174,15 @@ async def seed_demo(session_factory) -> int:
         event = await _demo_event(session, city)
         await _seed_profiles(session, event)
         await _detach_demo_from_other_events(session)
-        team_profiles = await _seed_team_profiles(session, event)
         await session.commit()
-        return team_profiles
 
 
 async def main() -> None:
     load_dotenv()
     engine = create_async_database_engine()
     try:
-        team_profiles = await seed_demo(create_session_factory(engine))
-        print(f"Fixed demo match is ready for event {DEMO_EVENT_ID}; team profiles={team_profiles}")
+        await seed_demo(create_session_factory(engine))
+        print(f"Fixed demo match is ready for event {DEMO_EVENT_ID}")
     finally:
         await engine.dispose()
 

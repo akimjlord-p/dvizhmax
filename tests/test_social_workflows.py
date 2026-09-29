@@ -26,12 +26,18 @@ from bot.feed import register_feed_handlers
 from bot.onboarding import CONSENT_VERSION, register_onboarding_handlers
 from infrastructure.db.models import City, Event, EventImage, EventSchedule, EventSource, EventTag, Tag
 from infrastructure.db.repositories import CompanionRepository, DemoRepository, FeedRepository, NotificationRepository, OnboardingRepository, UserError
-from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_EVENT_ID, DEMO_MAX_USER_ID, DEMO_MAX_USER_IDS
+from infrastructure.db.repositories.demo import (
+    DEMO_CONTACT_TEXT,
+    DEMO_EVENT_ID,
+    DEMO_MAX_USER_ID,
+    DEMO_MAX_USER_IDS,
+    DEMO_PROFILES,
+)
 from infrastructure.db.social_models import CompanionInterest, CompanionView, EventPlan, EventReaction, Match, MatchContact, User, UserTagWeight
 from bot.feed import DEMO_RESET_PAYLOAD, NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
 from bot.onboarding import PHOTO_NOT_RECOGNIZED
 from bot.notifications import retry_match_notifications_once, send_match_notifications
-from workers.demo_seed import _seed_profiles, seed_demo
+from workers.demo_seed import _seed_profiles
 from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT
 from bot.navigation import ERROR_TEXT, MENU_PAYLOAD
 from test_bot_routing import callback, message, select_handler
@@ -972,58 +978,105 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertEqual((await session.get(Match, match.id)).status, "closed")
 
-    async def test_two_team_accounts_can_match_on_demo_event(self):
-        """Configured team members behave as ordinary people on the same demo event."""
-        team_ids = (701_001, 701_002)
+    async def test_second_user_can_match_after_first_exhausted_demo_candidates(self):
+        """People who join the same demo event at different times can still match."""
+        event = await self.seed_demo()
         async with self.factory() as session:
-            # seed_demo finds Moscow by the KudaGo source code; use the test city
-            # so the team profiles and event are in the same city.
-            city = await session.get(City, self.city.id)
-            first_user, second_user = await session.get(User, self.user.id), await session.get(User, self.other.id)
-            city.source_codes = {"kudago": "msk"}
-            first_user.max_user_id, second_user.max_user_id = team_ids
-            await session.commit()
-        with patch.dict(os.environ, {"DEMO_TEAM_MAX_USER_IDS": ",".join(map(str, team_ids))}):
-            await seed_demo(self.factory)
-        async with self.factory() as session:
-            # The seed owns the canonical Moscow row for the demo event.
-            # Point the two test profiles at that same row, as production does.
-            demo_event = await session.get(Event, DEMO_EVENT_ID)
-            first_user, second_user = await session.get(User, self.user.id), await session.get(User, self.other.id)
-            first_user.city_id = second_user.city_id = demo_event.city_id
+            feed = FeedRepository(session)
+            first_plan = await feed.want_to_go(self.user.id, event.id)
+            await feed.set_company_search(self.user.id, first_plan.plan_id, looking=True)
+            self.assertTrue(await DemoRepository(session).ensure_candidates_for_plan(
+                user_id=self.user.id,
+                user_plan_id=first_plan.plan_id,
+            ))
             await session.commit()
 
-        async def open_demo(user_id):
-            async with self.factory() as session:
-                self.assertEqual(await DemoRepository(session).reset_for_user(user_id), DEMO_EVENT_ID)
-                plan = await FeedRepository(session).want_to_go(user_id, DEMO_EVENT_ID)
-                await FeedRepository(session).set_company_search(user_id, plan.plan_id, looking=True)
-                self.assertTrue(await DemoRepository(session).ensure_candidates_for_plan(
-                    user_id=user_id,
-                    user_plan_id=plan.plan_id,
-                ))
-                await session.commit()
-                return plan.plan_id
-
-        first_plan = await open_demo(self.user.id)
-        second_plan = await open_demo(self.other.id)
-
-        async def like_the_other(viewer_id, plan_id, other_user_id):
-            async with self.factory() as session:
-                people = CompanionRepository(session)
-                while card := await people.next_candidate(viewer_id, plan_id):
-                    result = await people.react(viewer_id, card.plan_id, liked=card.user_id == other_user_id)
-                    if card.user_id == other_user_id:
-                        await session.commit()
-                        return result
-                self.fail("Другой командный аккаунт не показан в демо")
-
-        first_result = await like_the_other(self.user.id, first_plan, self.other.id)
-        second_result = await like_the_other(self.other.id, second_plan, self.user.id)
-        self.assertFalse(first_result.created_match)
-        self.assertTrue(second_result.created_match)
+        # The first user rejects all fake profiles before the second user joins.
         async with self.factory() as session:
-            self.assertEqual((await session.get(Match, second_result.match_id)).status, "active")
+            people = CompanionRepository(session)
+            while card := await people.next_candidate(self.user.id, first_plan.plan_id):
+                self.assertIn(card.user_id, {profile.id for profile in DEMO_PROFILES})
+                await people.react(self.user.id, card.plan_id, liked=False)
+            await session.commit()
+
+        # The second user arrives later, sees the first user and likes them.
+        async with self.factory() as session:
+            feed = FeedRepository(session)
+            second_plan = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.other.id, second_plan.plan_id, looking=True)
+            self.assertTrue(await DemoRepository(session).ensure_candidates_for_plan(
+                user_id=self.other.id,
+                user_plan_id=second_plan.plan_id,
+            ))
+            people = CompanionRepository(session)
+            while card := await people.next_candidate(self.other.id, second_plan.plan_id):
+                result = await people.react(self.other.id, card.plan_id, liked=card.user_id == self.user.id)
+                if card.user_id == self.user.id:
+                    self.assertFalse(result.created_match)
+                    break
+            else:
+                self.fail("Первый пользователь не показан второму в демо")
+            await session.commit()
+
+        # The first user can answer through the incoming-like list and create a match.
+        async with self.factory() as session:
+            people = CompanionRepository(session)
+            liker = await people.next_liker(self.user.id, first_plan.plan_id)
+            self.assertEqual(liker.user_id, self.other.id)
+            result = await people.react(self.user.id, liker.plan_id, liked=True)
+            await session.commit()
+        self.assertTrue(result.created_match)
+        async with self.factory() as session:
+            self.assertEqual((await session.get(Match, result.match_id)).status, "active")
+
+    async def test_demo_fake_match_does_not_prevent_a_later_real_match(self):
+        """A demo-profile match leaves company search open for a real person later."""
+        event = await self.seed_demo()
+        katya = next(profile for profile in DEMO_PROFILES if profile.likes_user)
+        async with self.factory() as session:
+            feed = FeedRepository(session)
+            first_plan = await feed.want_to_go(self.user.id, event.id)
+            await feed.set_company_search(self.user.id, first_plan.plan_id, looking=True)
+            await DemoRepository(session).ensure_candidates_for_plan(
+                user_id=self.user.id,
+                user_plan_id=first_plan.plan_id,
+            )
+            people = CompanionRepository(session)
+            while card := await people.next_candidate(self.user.id, first_plan.plan_id):
+                result = await people.react(self.user.id, card.plan_id, liked=card.user_id == katya.id)
+                if card.user_id == katya.id:
+                    self.assertTrue(result.created_match)
+                    break
+            else:
+                self.fail("Демо Катя не показана в поиске компании")
+            self.assertEqual((await session.get(EventPlan, first_plan.plan_id)).company_status, "looking")
+            await session.commit()
+
+        async with self.factory() as session:
+            feed = FeedRepository(session)
+            second_plan = await feed.want_to_go(self.other.id, event.id)
+            await feed.set_company_search(self.other.id, second_plan.plan_id, looking=True)
+            await DemoRepository(session).ensure_candidates_for_plan(
+                user_id=self.other.id,
+                user_plan_id=second_plan.plan_id,
+            )
+            people = CompanionRepository(session)
+            while card := await people.next_candidate(self.other.id, second_plan.plan_id):
+                result = await people.react(self.other.id, card.plan_id, liked=card.user_id == self.user.id)
+                if card.user_id == self.user.id:
+                    self.assertFalse(result.created_match)
+                    break
+            else:
+                self.fail("Первый пользователь не показан второму после демо-мэтча")
+            await session.commit()
+
+        async with self.factory() as session:
+            people = CompanionRepository(session)
+            liker = await people.next_liker(self.user.id, first_plan.plan_id)
+            self.assertEqual(liker.user_id, self.other.id)
+            result = await people.react(self.user.id, liker.plan_id, liked=True)
+            await session.commit()
+        self.assertTrue(result.created_match)
 
     async def test_demo_profile_interest_is_excluded_from_the_digest(self):
         event = await self.event("Ordinary event")

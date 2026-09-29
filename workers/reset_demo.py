@@ -1,7 +1,7 @@
 """Clear all social state of the fixed /demo event and seed it again.
 
 Real users lose their plans, reactions, likes, views and matches on the demo
-event only. Demo profiles and opted-in team profiles are re-armed as looking.
+event only. Fixed demo profiles are re-armed as looking.
 Run with: docker compose --profile tools run --rm demo-reset
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from infrastructure.db.social_models import (
     Notification,
     NotificationInterest,
 )
-from workers.demo_seed import _demo_event, _detach_demo_from_other_events, _seed_profiles, _seed_team_profiles
+from workers.demo_seed import _demo_event, _detach_demo_from_other_events, _seed_profiles
 
 
 async def reset_demo_event() -> dict[str, int]:
@@ -68,12 +68,10 @@ async def reset_demo_event() -> dict[str, int]:
             event = await _demo_event(session, city)
             await _seed_profiles(session, event)
             await _detach_demo_from_other_events(session)
-            team_profiles = await _seed_team_profiles(session, event)
             await session.commit()
             print(
                 "Demo event reset: "
                 + ", ".join(f"{table}={rows}" for table, rows in deleted.items())
-                + f"; team profiles={team_profiles}"
             )
             return deleted
     finally:
