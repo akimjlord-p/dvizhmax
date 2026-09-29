@@ -1,7 +1,7 @@
-"""Voluntary contact exchange after a match: the user types a contact, confirms, the bot delivers it.
+"""Voluntary MAX profile-link exchange after a match.
 
-The contact is always typed by hand. MAX contact cards (request_contact) are not
-used, so a phone number is never passed on without the user writing it.
+The link is always typed by hand. MAX contact cards (request_contact) are not
+used, and a phone number or username cannot be passed on as a contact.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from infrastructure.db.repositories import ContactRepository, OnboardingRepository, UserError
 from infrastructure.db.repositories.contacts import ContactPeer, SentContact
-from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_MAX_USER_IDS
+from infrastructure.db.repositories.demo import DEMO_MAX_USER_IDS
 from .navigation import menu, menu_rows, report_error
 
 
@@ -27,8 +27,8 @@ def _share_button(match_id: UUID, text: str = "Поделиться контак
 
 def request_text(peer: ContactPeer) -> str:
     return (
-        f"Напиши контакт, которым готов поделиться с {peer.peer_name}: ссылку-приглашение MAX, @ник или телефон. "
-        "Бот передаст его дословно и не проверяет."
+        f"Пришли ссылку на свой профиль MAX для {peer.peer_name}.\n\n"
+        "Подойдёт только ссылка формата:\nhttps://max.ru/u/…"
     )
 
 
@@ -47,7 +47,7 @@ def confirm_attachments(match_id: UUID) -> list:
 
 
 def contact_from_message(event: MessageCreated) -> str | None:
-    """Only a typed link or contact counts; attached contact cards are ignored."""
+    """Only typed text counts; attached contact cards are ignored."""
     text = (event.message.body.text or "").strip()
     return text or None
 
@@ -75,7 +75,7 @@ async def handle_contact_message(
             return True
         await session.commit()
     await event.message.answer(
-        f"{saved.peer.peer_name} получит ровно этот текст:\n\n{saved.contact_text}",
+        f"{saved.peer.peer_name} получит эту ссылку:\n\n{saved.contact_text}",
         attachments=confirm_attachments(saved.peer.match_id),
     )
     return True
@@ -149,17 +149,10 @@ def register_contact_handlers(
                     await session.commit()
                 text = f"Контакт отправлен: {sent.peer.peer_name}."
                 if demo_peer:
-                    text += "\n\nЭто демо-анкета, в ответ она делится своим демо-контактом."
+                    text += "\n\nДемо-анкета уже прислала ссылку на бота в сообщении о мэтче."
                 elif not sent.peer_has_shared:
                     text += f"\n\nЕсли {sent.peer.peer_name} тоже поделится контактом, мы пришлём его сюда."
                 await event.edit(text, attachments=menu(), notify=False)
-                if demo_peer:
-                    # Show the receiving side of the exchange as well.
-                    await event.bot.send_message(
-                        user_id=event.callback.user.user_id,
-                        text=f"{sent.peer.peer_name} делится контактом по событию «{sent.peer.event_title}»:\n\n{DEMO_CONTACT_TEXT}",
-                        attachments=menu(),
-                    )
         except UserError as exc:
             if not answered:
                 await event.ack(str(exc))

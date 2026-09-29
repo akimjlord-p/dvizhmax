@@ -31,13 +31,14 @@ from infrastructure.db.social_models import CompanionInterest, CompanionView, Ev
 from bot.feed import DEMO_RESET_PAYLOAD, NO_CANDIDATES_TEXT, PERSON_LIKED_STATUS
 from bot.onboarding import PHOTO_NOT_RECOGNIZED
 from bot.notifications import retry_match_notifications_once, send_match_notifications
-from workers.demo_seed import _seed_profiles
+from workers.demo_seed import _seed_profiles, seed_demo
 from infrastructure.db.repositories.feed import KIDS_COMPANY_TEXT
 from bot.navigation import ERROR_TEXT, MENU_PAYLOAD
 from test_bot_routing import callback, message, select_handler
 
 
 TEST_URL = os.getenv("TEST_DATABASE_URL")
+MAX_PROFILE_LINK = "https://max.ru/u/f9LHodD0cOAaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz_-"
 
 
 async def strict_ack(notification=None):
@@ -401,17 +402,30 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         # A MAX contact card is not accepted: the phone must be typed on purpose.
         vcf = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+79990001122\nEND:VCARD"
         answer = await self.send_contact(contact={"vcf_info": vcf})
-        self.assertIn("Бот передаст его дословно и не проверяет", answer.call_args.args[0])
+        self.assertIn("ссылку на свой профиль MAX", answer.call_args.args[0])
 
-        answer = await self.send_contact(text="https://max.ru/join/alice")
-        self.assertIn("Bob получит ровно этот текст", answer.call_args.args[0])
+        for invalid_link in (
+            "https://max.ru/join/alice",
+            "@alice",
+            "+79990001122",
+            "http://max.ru/u/f9LHodD0cOAaBbCcDdEeFfGgHhIiJjKkLlMmNn",
+            f"{MAX_PROFILE_LINK}?source=chat",
+            f"Мой профиль: {MAX_PROFILE_LINK}",
+            "https://not-max.ru/u/f9LHodD0cOAaBbCcDdEeFfGgHhIiJjKkLlMmNn",
+        ):
+            with self.subTest(invalid_link=invalid_link):
+                answer = await self.send_contact(text=invalid_link)
+                self.assertIn("Пришли ссылку на профиль MAX", answer.call_args.args[0])
+        answer = await self.send_contact(text=f"  {MAX_PROFILE_LINK}/  ")
+        self.assertIn("Bob получит эту ссылку", answer.call_args.args[0])
+        self.assertIn(MAX_PROFILE_LINK, answer.call_args.args[0])
         self.assertEqual(payloads(answer.call_args.kwargs["attachments"]), [
             f"contact:confirm:{match_id}", f"contact:edit:{match_id}", f"contact:cancel:{match_id}",
         ])
         send, _, _ = await self.press(f"contact:edit:{match_id}")
-        self.assertIn("Бот передаст его дословно", send.await_args.kwargs["text"])
-        answer = await self.send_contact(text="https://max.ru/join/alice")
-        self.assertIn("https://max.ru/join/alice", answer.call_args.args[0])
+        self.assertIn("ссылку на свой профиль MAX", send.await_args.kwargs["text"])
+        answer = await self.send_contact(text=MAX_PROFILE_LINK)
+        self.assertIn(MAX_PROFILE_LINK, answer.call_args.args[0])
         async with self.factory() as session:
             user = await session.get(User, self.user.id)
             self.assertEqual(user.name, "Alice")  # the contact did not leak into the profile
@@ -420,7 +434,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         delivered = send.await_args.kwargs
         self.assertEqual(delivered["user_id"], 200)
         self.assertIn("Alice делится контактом", delivered["text"])
-        self.assertIn("https://max.ru/join/alice", delivered["text"])
+        self.assertIn(MAX_PROFILE_LINK, delivered["text"])
         self.assertIn(f"contact:share:{match_id}", payloads(delivered["attachments"]))
         self.assertIn("Контакт отправлен: Bob", edit.call_args.args[0])
 
@@ -514,7 +528,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_profile_is_deleted_only_after_confirmation(self):
         match_id = await self.matched_pair("Before delete")
         await self.press(f"contact:share:{match_id}")
-        await self.send_contact(text="@alice")
+        await self.send_contact(text=MAX_PROFILE_LINK)
         send, edit, _ = await self.press("onboarding:delete:ask")
         self.assertIn("Удалить профиль навсегда?", edit.call_args.args[0])
         async with self.factory() as session:
@@ -530,7 +544,7 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_contact_is_not_sent_and_text_goes_back_to_normal(self):
         match_id = await self.matched_pair("Cancel contact")
         await self.press(f"contact:share:{match_id}")
-        await self.send_contact(text="https://max.ru/join/abc")
+        await self.send_contact(text=MAX_PROFILE_LINK)
         send, edit, _ = await self.press(f"contact:cancel:{match_id}")
         send.assert_not_awaited()
         self.assertIn("Контакт не отправлен", edit.call_args.args[0])
@@ -542,14 +556,17 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             (await session.get(User, self.other.id)).max_user_id = DEMO_MAX_USER_ID
             await session.commit()
+        bot = SimpleNamespace(send_message=AsyncMock())
+        await send_match_notifications(bot, self.factory, match_id)
+        notification = bot.send_message.await_args.kwargs
+        self.assertEqual(notification["user_id"], 100)
+        self.assertIn(DEMO_CONTACT_TEXT, notification["text"])
         await self.press(f"contact:share:{match_id}")
-        await self.send_contact(text="@alice")
+        await self.send_contact(text=MAX_PROFILE_LINK)
         send, edit, _ = await self.press(f"contact:confirm:{match_id}")
-        self.assertIn("демо-анкета", edit.call_args.args[0])
-        # Nothing goes to the fake account; the demo replies with its own contact instead.
-        reply = send.await_args.kwargs
-        self.assertEqual(reply["user_id"], 100)
-        self.assertIn(DEMO_CONTACT_TEXT, reply["text"])
+        self.assertIn("Демо-анкета", edit.call_args.args[0])
+        # Nothing is sent to the fake account; its bot link arrived with the match.
+        send.assert_not_awaited()
 
     async def test_candidate_card_shows_only_interests_both_people_chose(self):
         event = await self.event("Common interests")
@@ -925,6 +942,88 @@ class SocialWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first.name, "Демо Лёша")
             match = await session.scalar(select(Match).where(Match.event_id == event.id))
             self.assertEqual(match.status, "closed")
+
+    async def test_demo_command_preserves_progress_until_explicit_reset(self):
+        event = await self.seed_demo()
+        async with self.factory() as session:
+            feed = FeedRepository(session)
+            own_plan = await feed.want_to_go(self.user.id, event.id)
+            await feed.set_company_search(self.user.id, own_plan.plan_id, looking=True)
+            demo_user = await session.scalar(select(User).where(User.max_user_id == DEMO_MAX_USER_ID))
+            first_user_id, second_user_id = sorted((self.user.id, demo_user.id), key=str)
+            match = Match(
+                event_id=event.id,
+                first_user_id=first_user_id,
+                second_user_id=second_user_id,
+            )
+            session.add(match)
+            await session.commit()
+
+        command = message("/demo", 100)
+        handler = await select_handler(self.dispatcher, command)
+        command.bot = SimpleNamespace(me=None, send_message=AsyncMock())
+        with patch.object(type(command.message), "answer", new_callable=AsyncMock) as answer:
+            await handler(command)
+        self.assertIn("Демо-сценарий", answer.call_args.args[0])
+        async with self.factory() as session:
+            self.assertEqual((await session.get(Match, match.id)).status, "active")
+
+        await self.click(DEMO_RESET_PAYLOAD)
+        async with self.factory() as session:
+            self.assertEqual((await session.get(Match, match.id)).status, "closed")
+
+    async def test_two_team_accounts_can_match_on_demo_event(self):
+        """Configured team members behave as ordinary people on the same demo event."""
+        team_ids = (701_001, 701_002)
+        async with self.factory() as session:
+            # seed_demo finds Moscow by the KudaGo source code; use the test city
+            # so the team profiles and event are in the same city.
+            city = await session.get(City, self.city.id)
+            first_user, second_user = await session.get(User, self.user.id), await session.get(User, self.other.id)
+            city.source_codes = {"kudago": "msk"}
+            first_user.max_user_id, second_user.max_user_id = team_ids
+            await session.commit()
+        with patch.dict(os.environ, {"DEMO_TEAM_MAX_USER_IDS": ",".join(map(str, team_ids))}):
+            await seed_demo(self.factory)
+        async with self.factory() as session:
+            # The seed owns the canonical Moscow row for the demo event.
+            # Point the two test profiles at that same row, as production does.
+            demo_event = await session.get(Event, DEMO_EVENT_ID)
+            first_user, second_user = await session.get(User, self.user.id), await session.get(User, self.other.id)
+            first_user.city_id = second_user.city_id = demo_event.city_id
+            await session.commit()
+
+        async def open_demo(user_id):
+            async with self.factory() as session:
+                self.assertEqual(await DemoRepository(session).reset_for_user(user_id), DEMO_EVENT_ID)
+                plan = await FeedRepository(session).want_to_go(user_id, DEMO_EVENT_ID)
+                await FeedRepository(session).set_company_search(user_id, plan.plan_id, looking=True)
+                self.assertTrue(await DemoRepository(session).ensure_candidates_for_plan(
+                    user_id=user_id,
+                    user_plan_id=plan.plan_id,
+                ))
+                await session.commit()
+                return plan.plan_id
+
+        first_plan = await open_demo(self.user.id)
+        second_plan = await open_demo(self.other.id)
+
+        async def like_the_other(viewer_id, plan_id, other_user_id):
+            async with self.factory() as session:
+                people = CompanionRepository(session)
+                while card := await people.next_candidate(viewer_id, plan_id):
+                    result = await people.react(viewer_id, card.plan_id, liked=card.user_id == other_user_id)
+                    if card.user_id == other_user_id:
+                        await session.commit()
+                        return result
+                self.fail("Другой командный аккаунт не показан в демо")
+
+        first_result = await like_the_other(self.user.id, first_plan, self.other.id)
+        second_result = await like_the_other(self.other.id, second_plan, self.user.id)
+        self.assertFalse(first_result.created_match)
+        self.assertTrue(second_result.created_match)
+        async with self.factory() as session:
+            self.assertEqual((await session.get(Match, second_result.match_id)).status, "active")
 
     async def test_demo_profile_interest_is_excluded_from_the_digest(self):
         event = await self.event("Ordinary event")

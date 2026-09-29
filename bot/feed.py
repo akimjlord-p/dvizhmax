@@ -505,15 +505,16 @@ def register_feed_handlers(
     @dispatcher.message_created(Command("demo"))
     async def on_demo(event: MessageCreated) -> None:
         if user_id := await started_user(event):
-            await start_demo(event.message.answer, event.message.sender.user_id, user_id, event.bot)
+            await show_demo(event.message.answer, event.message.sender.user_id, user_id, event.bot)
 
-    async def start_demo(answer, max_user_id: int, user_id: UUID, bot: Bot) -> None:
+    async def show_demo(answer, max_user_id: int, user_id: UUID, bot: Bot, *, reset: bool = False) -> None:
+        """Open the fixed demo event without resetting a user's progress by default."""
         user = await current_user(max_user_id)
         if user is None or user.profile_status != "active":
             await answer("Для демо мэтча сначала создай анкету через /profile.", attachments=menu())
             return
         async with session_factory() as session:
-            event_id = await DemoRepository(session).reset_for_user(user_id)
+            event_id = await DemoRepository(session).reset_for_user(user_id) if reset else DEMO_EVENT_ID
             card = (
                 await FeedRepository(session).buffered_card(user_id, event_id, include_reacted=True)
                 if event_id else None
@@ -599,7 +600,15 @@ def register_feed_handlers(
             if action == "menu":
                 await send_next_card("Главное меню", attachments=menu())
             elif action == "demo":
-                await start_demo(send_next_card, event.callback.user.user_id, user_id, event.bot)
+                if value != "reset":
+                    raise UserError("Неизвестное действие демо")
+                await show_demo(
+                    send_next_card,
+                    event.callback.user.user_id,
+                    user_id,
+                    event.bot,
+                    reset=True,
+                )
             elif action == "browse":
                 mode, index = value.split("|")
                 await browse(send_next_card, user_id, event.bot, mode, int(index))

@@ -76,7 +76,7 @@ DEMO_CANDIDATE_ORDER = {profile.max_user_id: position for position, profile in e
 # Kept for compatibility: the demo profile that likes the user.
 DEMO_MAX_USER_ID = next(profile.max_user_id for profile in DEMO_PROFILES if profile.likes_user)
 MIRRORED_INTERESTS = 3
-DEMO_CONTACT_TEXT = "https://max.ru/t110_hakaton_max_bot (демо-контакт: у демо-анкеты нет настоящего профиля)"
+DEMO_CONTACT_TEXT = "https://max.ru/t110_hakaton_max_bot"
 
 
 class DemoRepository:

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import re
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -15,6 +17,32 @@ from .errors import UserError
 
 # A forgotten share request must not swallow unrelated messages forever.
 PENDING_CONTACT_TTL = timedelta(hours=1)
+MAX_PROFILE_LINK_ERROR = (
+    "Пришли ссылку на профиль MAX в формате https://max.ru/u/… "
+    "без @ника, телефона и другого текста"
+)
+_MAX_PROFILE_PATH = re.compile(r"/u/([A-Za-z0-9_-]{20,200})/?\Z")
+
+
+def normalize_max_profile_link(value: str) -> str:
+    """Validate and canonicalize a public MAX profile link without following it."""
+    value = value.strip()
+    if not 1 <= len(value) <= 500:
+        raise UserError(MAX_PROFILE_LINK_ERROR)
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise UserError(MAX_PROFILE_LINK_ERROR) from exc
+    match = _MAX_PROFILE_PATH.fullmatch(parsed.path)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "max.ru"
+        or parsed.query
+        or parsed.fragment
+        or match is None
+    ):
+        raise UserError(MAX_PROFILE_LINK_ERROR)
+    return f"https://max.ru/u/{match.group(1)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,9 +114,7 @@ class ContactRepository:
         return PendingContact(peer, row.status, row.contact_text)
 
     async def set_contact(self, user_id: UUID, *, contact_text: str) -> PendingContact:
-        contact_text = contact_text.strip()
-        if not 1 <= len(contact_text) <= 500:
-            raise UserError("Контакт должен быть от 1 до 500 символов")
+        contact_text = normalize_max_profile_link(contact_text)
         pending = await self.pending(user_id)
         if pending is None:
             raise UserError("Сначала нажми «Поделиться контактом» в сообщении о мэтче")

@@ -10,7 +10,7 @@ from maxapi import Bot
 from maxapi.types import ButtonsPayload, CallbackButton
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from infrastructure.db.repositories.demo import DEMO_MAX_USER_IDS
+from infrastructure.db.repositories.demo import DEMO_CONTACT_TEXT, DEMO_MAX_USER_IDS
 from infrastructure.db.repositories.notifications import InterestDigest, MatchRecipients, NotificationRepository
 from .navigation import menu_rows
 
@@ -29,12 +29,15 @@ def _people(count: int) -> str:
     return f"хотят пойти {count} человек"
 
 
-def match_message(*, event_title: str, peer_name: str) -> str:
-    return (
+def match_message(*, event_title: str, peer_name: str, demo_contact: str | None = None) -> str:
+    text = (
         "Есть мэтч 🎉\n\n"
         f"Вы оба хотите пойти на «{event_title}» вместе.\n\n"
         f"Твоя компания: {peer_name}"
     )
+    if demo_contact:
+        text += f"\n\nДемо-анкета делится контактом бота:\n{demo_contact}"
+    return text
 
 
 def match_attachments(match_id: UUID) -> list:
@@ -80,18 +83,32 @@ async def send_match_notifications(
 async def _send_match_messages(bot: Bot, recipients: MatchRecipients, match_id: UUID) -> tuple[bool, bool]:
     """Return whether each side now has the message; demo profiles count as delivered."""
     sides = (
-        (recipients.first_notified, recipients.first_max_user_id, recipients.second_name),
-        (recipients.second_notified, recipients.second_max_user_id, recipients.first_name),
+        (
+            recipients.first_notified,
+            recipients.first_max_user_id,
+            recipients.second_name,
+            recipients.second_max_user_id,
+        ),
+        (
+            recipients.second_notified,
+            recipients.second_max_user_id,
+            recipients.first_name,
+            recipients.first_max_user_id,
+        ),
     )
     delivered = []
-    for already_sent, user_id, peer_name in sides:
+    for already_sent, user_id, peer_name, peer_max_user_id in sides:
         if already_sent or user_id in DEMO_MAX_USER_IDS:
             delivered.append(True)
             continue
         try:
             await bot.send_message(
                 user_id=user_id,
-                text=match_message(event_title=recipients.event_title, peer_name=peer_name),
+                text=match_message(
+                    event_title=recipients.event_title,
+                    peer_name=peer_name,
+                    demo_contact=DEMO_CONTACT_TEXT if peer_max_user_id in DEMO_MAX_USER_IDS else None,
+                ),
                 attachments=match_attachments(match_id),
             )
             delivered.append(True)
